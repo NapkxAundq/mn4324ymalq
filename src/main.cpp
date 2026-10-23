@@ -436,7 +436,7 @@ public:
         }
 
         if (isCube && push && ticksFrame0 < targetHorizon) {
-            printf("[InputBuffer] CUBE PREDICTION: immediate jump may die within %d ticks; no safe timing found within %d ticks.\\n",
+            printf("[InputBuffer] CUBE PREDICTION: immediate jump may die within %d ticks; no safe timing found within %d ticks.\n",
                 targetHorizon, maxDelayFrames);
         }
 
