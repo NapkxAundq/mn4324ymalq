@@ -132,31 +132,19 @@ private:
         m_gameHolding = push;
     }
 
-    void flushPendingInput(PlayLayer* pl, SIPInputQueue* sipOutput = nullptr,
-                           std::vector<std::pair<double, bool>>* fallbackActions = nullptr) {
+    void flushPendingInput(PlayLayer* pl) {
         if (!pl) {
             clearPendingInput();
             return;
         }
 
-        auto emit = [&](bool push, SIPInput const* source) {
-            if (sipOutput && source) {
-                appendSIPAction(pl, *sipOutput, *source, push, fallbackActions);
-            } else {
-                m_SimFireButton(pl, push);
-                if (fallbackActions) fallbackActions->push_back({0.0, push});
-            }
-        };
-
+        // This path is reserved for emergency passthroughs (e.g. an input-mod conflict or
+        // a mode transition). Never drop a captured press/release pair in that case.
         if (m_waitTicks >= 0) {
-            emit(m_bufferedPush, m_hasBufferedSIPInput ? &m_bufferedSIPInput : nullptr);
-            if (m_queuedOpposite) {
-                emit(!m_bufferedPush, m_hasQueuedOppositeSIPInput ? &m_queuedOppositeSIPInput : nullptr);
-            }
+            m_SimFireButton(pl, m_bufferedPush);
+            if (m_queuedOpposite) m_SimFireButton(pl, !m_bufferedPush);
         } else if (m_waitTicks == -2 || m_sipReadyAction) {
-            emit(!m_bufferedPush,
-                 m_hasQueuedOppositeSIPInput ? &m_queuedOppositeSIPInput :
-                 (m_hasBufferedSIPInput ? &m_bufferedSIPInput : nullptr));
+            m_SimFireButton(pl, !m_bufferedPush);
         }
         clearPendingInput();
     }
@@ -207,7 +195,7 @@ public:
     }
 
     // F9 cycles through 2, 4, 8, 16, 24 ticks, then OFF.
-    // Flush a captured input before changing presets so it is not silently discarded.
+    // A command already in flight remains on its captured schedule when presets change.
     void cyclePreset() {
         // Leave an already-captured input on its existing schedule. The buffer scheduler
         // continues any pending action even if the selected preset becomes OFF.
@@ -523,7 +511,7 @@ public:
             return true;
         }
 
-        if (!m_enabled) {
+        if (!m_enabled && m_waitTicks == -1 && !m_sipReadyAction) {
             m_gameHolding = push;
             return true;
         }
