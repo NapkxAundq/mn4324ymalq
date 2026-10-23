@@ -25,6 +25,8 @@ using namespace geode::prelude;
 // This keeps isolated micro-clicks and spike/sawblade dodges 100% protected!
 constexpr int SPAM_INTERVAL_TICKS = 8;
 constexpr int SPAM_STREAK_REQUIRED = 3;
+// A Wave press/release pair this close together is precision input, not spam to delay.
+constexpr int WAVE_MICROCLICK_MAX_TICKS = 4;
 
 // Cap the time spent comparing candidate delays. The budget is checked between simulations,
 // never mid-simulation; hitting it fails open (the live input passes through).
@@ -617,14 +619,25 @@ public:
             return true;
         }
 
-        // 2. If an input is currently waiting in the buffer and the user quickly releases
-        // (or re-presses) 1-2 ticks later, queue it for the next tick so fast taps are never eaten
+        bool isWave = p1->m_isDart || (isDual && p2 && p2->m_isDart);
+        bool isMiniWave = (p1->m_isDart && p1->m_vehicleSize < 1.0f) ||
+                          (isDual && p2 && p2->m_isDart && p2->m_vehicleSize < 1.0f);
+        bool isCube = p1->isInNormalMode() && (!isDual || !p2 || p2->isInNormalMode());
+
+        // 2. While a prediction is pending, never leave a short Wave transition queued
+        // for the full delay. Convert a rapid opposite input into a minimum one-tick pulse.
+        // SIP needs one countdown tick to stage the action for its next queue-processing phase.
         if (m_waitTicks >= 0) {
             if (push != m_bufferedPush) {
                 m_queuedOpposite = true;
                 if (sipInput) {
                     m_queuedOppositeSIPInput = *sipInput;
                     m_hasQueuedOppositeSIPInput = true;
+                }
+
+                if (isWave && m_ticksSinceLastInput <= WAVE_MICROCLICK_MAX_TICKS) {
+                    m_waitTicks = sipOutput ? 1 : 0;
+                    m_rapidInputStreak = std::max(m_rapidInputStreak, SPAM_STREAK_REQUIRED - 1);
                 }
             } else {
                 m_queuedOpposite = false;
@@ -666,10 +679,14 @@ public:
             m_sipReadyAction = false;
         }
 
-        bool isWave = p1->m_isDart || (isDual && p2 && p2->m_isDart);
-        bool isMiniWave = (p1->m_isDart && p1->m_vehicleSize < 1.0f) ||
-                          (isDual && p2 && p2->m_isDart && p2->m_vehicleSize < 1.0f);
-        bool isCube = p1->isInNormalMode() && (!isDual || !p2 || p2->isInNormalMode());
+        // A short Wave release after an input that already reached the game must pass
+        // through unchanged. Otherwise the prediction could stretch a microclick into a hold.
+        if (isWave && !push && m_ticksSinceLastInput <= WAVE_MICROCLICK_MAX_TICKS) {
+            m_gameHolding = false;
+            m_rapidInputStreak = std::max(m_rapidInputStreak, SPAM_STREAK_REQUIRED - 1);
+            m_ticksSinceLastInput = 0;
+            return true;
+        }
 
         // 3. STREAK-BASED WAVE SPAM GUARD:
         // Only bypasses if you perform 3+ rapid inputs in a row (< 8 ticks apart).
@@ -743,8 +760,26 @@ public:
         int bestDelay = 0;
         int bestTicks = ticksFrame0;
 
+        std::vector<int> delayCandidates;
+        delayCandidates.reserve(static_cast<size_t>(maxDelayFrames));
+        auto addDelayCandidate = [&](int delay) {
+            if (delay < 1 || delay > maxDelayFrames) return;
+            if (std::find(delayCandidates.begin(), delayCandidates.end(), delay) == delayCandidates.end()) {
+                delayCandidates.push_back(delay);
+            }
+        };
+        // Long stages used to spend nearly the whole search budget on delays 1..4.
+        // Probe across the permitted window first, then refine in ascending order as budget allows.
+        if (conservativeHighDelay) {
+            addDelayCandidate(1);
+            addDelayCandidate(maxDelayFrames / 3);
+            addDelayCandidate((maxDelayFrames * 2) / 3);
+            addDelayCandidate(maxDelayFrames);
+        }
+        for (int delay = 1; delay <= maxDelayFrames; ++delay) addDelayCandidate(delay);
+
         int candidatesTested = 0;
-        for (int delay = 1; delay <= maxDelayFrames; delay++) {
+        for (int delay : delayCandidates) {
             // Always evaluate the first four real delay candidates, even on a slower PC;
             // a strict time-only cutoff here previously made the buffer pass every input.
             if (candidatesTested >= 4 && simulationBudgetExceeded()) {
@@ -768,9 +803,11 @@ public:
                 // is important on levels where every candidate encounters a later hazard.
                 int minClearedGain = (delay * 2) + 10;
                 if (ticks >= targetHorizon && (ticks - ticksFrame0) >= (delay * 2) + 6) {
-                    bestDelay = delay;
-                    bestTicks = ticks;
-                    break;
+                    if (bestDelay == 0 || delay < bestDelay) {
+                        bestDelay = delay;
+                        bestTicks = ticks;
+                    }
+                    if (!conservativeHighDelay || bestDelay == 1) break;
                 }
                 if (!conservativeHighDelay &&
                     ticks >= ticksFrame0 + minClearedGain && ticks > bestTicks + 2) {
@@ -780,9 +817,11 @@ public:
                 }
             } else {
                 if (ticks >= targetHorizon) {
-                    bestDelay = delay;
-                    bestTicks = ticks;
-                    break;
+                    if (bestDelay == 0 || delay < bestDelay) {
+                        bestDelay = delay;
+                        bestTicks = ticks;
+                    }
+                    if (!conservativeHighDelay || bestDelay == 1) break;
                 }
                 // Do not require a full horizon for every mode: a meaningful survival gain
                 // is a valid save, just as in LilWC's original implementation.
