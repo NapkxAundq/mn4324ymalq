@@ -1,0 +1,64 @@
+name: Build InputBuffer2 source-reviewed local mod
+
+on:
+  push:
+    branches:
+      - inputbuffer2-safe-build
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Windows / Geometry Dash 2.2081
+    runs-on: windows-latest
+    steps:
+      - name: Checkout build workflow repository
+        uses: actions/checkout@v4
+
+      - name: Checkout reviewed upstream source at a fixed commit
+        uses: actions/checkout@v4
+        with:
+          repository: Headcarved/InputBuffer2
+          ref: 004bca30d08fd104f69261ccd655bc0a4baf0870
+          path: upstream-source
+
+      - name: Prepare isolated mod project and unique ID
+        shell: pwsh
+        run: |
+          $workspace = $env:GITHUB_WORKSPACE
+          Get-ChildItem -Force $workspace |
+            Where-Object { $_.Name -notin @(".git", ".github", "upstream-source") } |
+            Remove-Item -Recurse -Force
+
+          Get-ChildItem -Force "$workspace\upstream-source" |
+            Where-Object { $_.Name -notin @(".git", ".github") } |
+            Copy-Item -Destination $workspace -Recurse -Force
+
+          Remove-Item -Recurse -Force "$workspace\upstream-source"
+
+          $manifestPath = Join-Path $workspace "mod.json"
+          $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+          $manifest.id = "local.inputbuffer2-safe"
+          $manifest.name = "InputBuffer2 (Source Reviewed)"
+          $manifest.version = "v1.0.0"
+          $manifest.developer = "Local Source Build"
+          $manifest.description = "Local build from reviewed Headcarved/InputBuffer2 source. Extends button holds by configurable physics ticks; it is not a trajectory predictor."
+          $json = $manifest | ConvertTo-Json -Depth 16
+          [System.IO.File]::WriteAllText($manifestPath, $json, [System.Text.UTF8Encoding]::new($false))
+
+      - name: Build Geode mod
+        id: build
+        uses: geode-sdk/build-geode-mod@main
+        with:
+          sdk: given
+          target: Win64
+          build-config: Release
+          use-lto: false
+
+      - name: Upload compiled mod
+        uses: actions/upload-artifact@v4
+        with:
+          name: InputBuffer2-SourceReviewed-Windows
+          path: ${{ steps.build.outputs.build-output }}/*.geode
+          if-no-files-found: error
