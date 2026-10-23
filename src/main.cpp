@@ -420,7 +420,7 @@ public:
             readySource.input.m_button = PlayerButton::Jump;
             readySource.input.m_isPush = m_sipReadyPush;
             readySource.input.m_isPlayer2 = false;
-            readyRatio = haveFreshJump ? std::min(readySource.ratio, earliestFreshJumpRatio) : readySource.ratio;
+            readyRatio = hasFreshJump ? std::min(readySource.ratio, earliestFreshJumpRatio) : readySource.ratio;
             readySource.ratio = readyRatio;
             timeline.push_back({readySource, true, m_sipReadyPush, 0});
         }
