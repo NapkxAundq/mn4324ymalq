@@ -46,6 +46,7 @@ private:
     bool m_simulationUnsupported = false;
     bool m_warnedInputModConflict = false;
     bool m_warnedBudgetCutoff = false;
+    int m_noSaveDiagnostics = 0; // bounded per-level diagnostics so no-op regressions are visible
 
     // Tracks actual physical mouse state vs what PlayLayer currently has active
     bool m_physicalHolding = false;
@@ -192,6 +193,7 @@ public:
         m_rapidInputStreak = 0;
         m_warnedInputModConflict = false;
         m_warnedBudgetCutoff = false;
+        m_noSaveDiagnostics = 0;
         m_simulationUnsupported = false;
     }
 
@@ -724,6 +726,10 @@ public:
         // If the path touches unsupported trigger logic, do not let a guessed trajectory
         // delay an input. Pass through the player's actual command instead.
         if (ticksFrame0 < 0) {
+            if (m_noSaveDiagnostics < 8) {
+                printf("[InputBuffer] Prediction unavailable for this input; passing through instead of delaying an unverified click. Check the current level's collision/trigger area.\n");
+                ++m_noSaveDiagnostics;
+            }
             m_gameHolding = push;
             return true;
         }
@@ -798,9 +804,13 @@ public:
             return false;
         }
 
-        if (isCube && push && ticksFrame0 < targetHorizon && bestDelay == 0) {
-            printf("[InputBuffer] CUBE PREDICTION: immediate jump may die within %d ticks; no safe timing found within %d ticks.\n",
-                targetHorizon, maxDelayFrames);
+        if (push && ticksFrame0 < targetHorizon && bestDelay == 0 && m_noSaveDiagnostics < 8) {
+            const char* modeName = isWave ? "WAVE" :
+                (p1->m_isRobot ? "ROBOT" : (p1->m_isBall ? "BALL" :
+                (p1->m_isBird ? "UFO" : (isCube ? "CUBE" : "OTHER"))));
+            printf("[InputBuffer] No save found for %s: baseline=%d/%d ticks, tested %d/%d delays. Buffer is active; no candidate met LilWC's save thresholds.\n",
+                modeName, ticksFrame0, targetHorizon, candidatesTested, maxDelayFrames);
+            ++m_noSaveDiagnostics;
         }
 
         m_gameHolding = push;
@@ -884,7 +894,7 @@ $on_mod(Loaded) {
     freopen_s(&f, "CONOUT$", "w", stdout);
     SetConsoleTitleA("Geode Predictive Input Buffer - Live Console");
     printf("============================================================\n");
-    printf(" [InputBuffer] v1.0.9 LOADED (LilWC timing restored + resilient candidate search)\n");
+    printf(" [InputBuffer] v1.0.9 LOADED (LilWC thresholds restored; bounded search + no-save diagnostics)\n");
     printf(" [InputBuffer] Starting Mode: STAGE 1 (2 All / 2 Wave)\n");
     printf(" [InputBuffer] Press F9 in-level to cycle: 2/2 -> 4/4 -> 8/8 -> 16/16 -> 24/24 -> OFF\n");
     printf("============================================================\n");
