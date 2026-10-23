@@ -119,6 +119,7 @@ public:
         m_firingBuffered = false;
         m_ticksSinceLastInput = 999;
         m_rapidInputStreak = 0;
+        m_warnedInputModConflict = false;
     }
 
     void quit() {
@@ -516,6 +517,8 @@ public:
     }
 
     void advanceBufferTick(PlayerObject* player) {
+        PlayLayer* pl = PlayLayer::get();
+        if (!pl || !player || player != pl->m_player1) return;
         if (!m_enabled) return;
 
         if (m_ticksSinceLastInput < 999) {
