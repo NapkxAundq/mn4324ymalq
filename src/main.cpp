@@ -9,6 +9,9 @@
 #include <Windows.h>
 #include <cstdio>
 #include <algorithm>
+#include <vector>
+#include <utility>
+#include "SIPInputQueue.hpp"
 
 using namespace geode::prelude;
 
@@ -38,7 +41,7 @@ private:
     bool m_physicalHolding = false;
     bool m_gameHolding = false;
 
-    // F9 Cycle State (Starts on Stage 0: 2 ticks Normal / 2 ticks Wave)
+    // F6 Cycle State (Starts on Stage 0: 2 ticks Normal / 2 ticks Wave)
     int  m_presetIndex = 0;
     bool m_enabled = true;
     int  m_maxTicksNormal = 2;
@@ -77,16 +80,12 @@ private:
     void syncSimPlayer(PlayerObject* sim, PlayerObject* real) {
         sim->setVisible(false);
         sim->copyAttributes(real);
-
-        // Use the live player's state for every forecast. Without this, the clone
-        // can remain at an old position and predict cube jumps against the wrong objects.
         sim->setPosition(real->getPosition());
         sim->setRotation(real->getRotation());
         sim->m_yVelocity = real->m_yVelocity;
         sim->m_jumpBuffered = real->m_jumpBuffered;
         sim->m_isOnGround2 = real->m_isOnGround2;
         sim->m_platformerXVelocity = real->m_platformerXVelocity;
-
         sim->setScale(real->getScale());
         sim->setContentSize(real->getContentSize());
         sim->m_width = real->m_width;
@@ -120,7 +119,6 @@ public:
         m_firingBuffered = false;
         m_ticksSinceLastInput = 999;
         m_rapidInputStreak = 0;
-        m_warnedInputModConflict = false;
     }
 
     void quit() {
@@ -139,39 +137,33 @@ public:
         m_rapidInputStreak = 0;
     }
 
-    // F9 cycles: 2/2 -> 4/4 -> 8/8 -> 16/16 -> 24/24 -> OFF.
+    // F9 cycles through 2, 4, 8, 16, 24 ticks, then OFF.
     void cyclePreset() {
         m_presetIndex = (m_presetIndex + 1) % 6;
         m_waitTicks = -1;
         m_queuedOpposite = false;
-
         switch (m_presetIndex) {
             case 0:
                 m_enabled = true; m_maxTicksNormal = 2; m_maxTicksWave = 2;
-                printf("[InputBuffer] F9 Cycle -> STAGE 1: 2 Ticks All | 2 Ticks Wave (0.5f @ 60fps)\n");
-                break;
+                printf("[InputBuffer] F9 Cycle -> STAGE 1: 2 Ticks All | 2 Ticks Wave (0.5f @ 60fps)\n"); break;
             case 1:
                 m_enabled = true; m_maxTicksNormal = 4; m_maxTicksWave = 4;
-                printf("[InputBuffer] F9 Cycle -> STAGE 2: 4 Ticks All | 4 Ticks Wave (1.0f @ 60fps)\n");
-                break;
+                printf("[InputBuffer] F9 Cycle -> STAGE 2: 4 Ticks All | 4 Ticks Wave (1.0f @ 60fps)\n"); break;
             case 2:
                 m_enabled = true; m_maxTicksNormal = 8; m_maxTicksWave = 8;
-                printf("[InputBuffer] F9 Cycle -> STAGE 3: 8 Ticks All | 8 Ticks Wave (2.0f @ 60fps)\n");
-                break;
+                printf("[InputBuffer] F9 Cycle -> STAGE 3: 8 Ticks All | 8 Ticks Wave (2.0f @ 60fps)\n"); break;
             case 3:
                 m_enabled = true; m_maxTicksNormal = 16; m_maxTicksWave = 16;
-                printf("[InputBuffer] F9 Cycle -> STAGE 4: 16 Ticks All | 16 Ticks Wave (4.0f / 4.0f @ 60fps)\n");
-                break;
+                printf("[InputBuffer] F9 Cycle -> STAGE 4: 16 Ticks All | 16 Ticks Wave (4.0f / 4.0f @ 60fps)\n"); break;
             case 4:
                 m_enabled = true; m_maxTicksNormal = 24; m_maxTicksWave = 24;
-                printf("[InputBuffer] F9 Cycle -> STAGE 5: 24 Ticks All | 24 Ticks Wave (6.0f / 6.0f @ 60fps)\n");
-                break;
+                printf("[InputBuffer] F9 Cycle -> STAGE 5: 24 Ticks All | 24 Ticks Wave (6.0f / 6.0f @ 60fps)\n"); break;
             case 5:
                 m_enabled = false; m_maxTicksNormal = 0; m_maxTicksWave = 0;
-                printf("[InputBuffer] F9 Cycle -> STAGE 6: OFF (100%% Raw Input)\n");
-                break;
+                printf("[InputBuffer] F9 Cycle -> STAGE 6: OFF (100%% Raw Input)\n"); break;
         }
     }
+
 
     bool isSimulating() const { return m_simulating; }
     bool isFiringBuffered() const { return m_firingBuffered; }
@@ -287,6 +279,64 @@ public:
         return survived;
     }
 
+    bool isSIPEnabled() const {
+        auto* loader = Loader::get();
+        if (!loader) return false;
+        auto* sip = loader->getLoadedMod("chizz.superb-input-precision");
+        return sip && sip->getSettingValue<bool>("mod-enabled");
+    }
+
+    bool isCBFLoaded() const {
+        auto* loader = Loader::get();
+        if (!loader) return false;
+        return loader->getLoadedMod("syzzi.click_between_frames") != nullptr ||
+               loader->getLoadedMod("zmx.cbf-lite") != nullptr ||
+               loader->getLoadedMod("alphalaneous.click_after_frames") != nullptr;
+    }
+
+    bool hasInputModConflict() const {
+        return isSIPEnabled() && isCBFLoaded();
+    }
+
+    bool usesSIPTickClock() const {
+        return isSIPEnabled() && !isCBFLoaded();
+    }
+
+    bool filterSIPInputQueue(float dt) {
+        if (!usesSIPTickClock() || m_simulating || dt <= 0.f) return false;
+        auto queueResult = subtickinputs::getInputQueueWithRatios(dt);
+        if (queueResult.isErr()) {
+            log::warn("SIP queue API unavailable; leaving raw inputs untouched");
+            return false;
+        }
+        auto queueWithRatios = queueResult.unwrap();
+        std::vector<subtickinputs::PlayerButtonCommandWithRatio> filtered;
+        filtered.reserve(queueWithRatios.size());
+        auto* pl = PlayLayer::get();
+        if (!pl) return false;
+        for (auto& item : queueWithRatios) {
+            bool keepInput = true;
+            if (static_cast<int>(item.input.m_button) == 1) {
+                keepInput = interceptInput(pl, item.input.m_isPush, !item.input.m_isPlayer2);
+            }
+            if (keepInput) filtered.push_back(item);
+        }
+        auto setResult = subtickinputs::setInputQueueWithRatios(std::move(filtered), dt);
+        if (setResult.isErr()) {
+            log::warn("SIP rejected the filtered input queue; inputs were not delayed this tick");
+            return false;
+        }
+        return true;
+    }
+
+    void onSIPPhysicsTick() {
+        if (!usesSIPTickClock()) return;
+        auto* pl = PlayLayer::get();
+        if (!pl || !pl->m_player1) return;
+        if (GetAsyncKeyState(VK_F9) & 1) cyclePreset();
+        advanceBufferTick(pl->m_player1);
+    }
+
     bool interceptInput(GJBaseGameLayer* layer, bool push, bool isPlayer1) {
         PlayLayer* pl = PlayLayer::get();
         if (!pl) return true;
@@ -305,14 +355,12 @@ public:
         // Always record the user's true physical mouse/key state first!
         m_physicalHolding = push;
 
-        // If both mutually-incompatible timing mods are somehow active, fail open:
-        // do not delay or swallow inputs, and avoid leaving a stale queued action.
         if (hasInputModConflict()) {
             m_waitTicks = -1;
             m_queuedOpposite = false;
             m_gameHolding = push;
             if (!m_warnedInputModConflict) {
-                printf("[InputBuffer] WARNING: CBF and SIP are both active. Disable one; buffer bypassed.\\n");
+                printf("[InputBuffer] WARNING: CBF and SIP are both active. Disable one; buffer bypassed.\n");
                 m_warnedInputModConflict = true;
             }
             return true;
@@ -450,7 +498,7 @@ public:
             return false;
         }
 
-        if (isCube && push && ticksFrame0 < targetHorizon) {
+        if (isCube && push && ticksFrame0 < targetHorizon && bestDelay == 0) {
             printf("[InputBuffer] CUBE PREDICTION: immediate jump may die within %d ticks; no safe timing found within %d ticks.\n",
                 targetHorizon, maxDelayFrames);
         }
@@ -459,62 +507,16 @@ public:
         return true;
     }
 
-    bool isSIPEnabled() const {
-        auto* loader = Loader::get();
-        if (!loader) return false;
-        auto* sip = loader->getLoadedMod("chizz.superb-input-precision");
-        // A mod may be installed/loaded while disabled in its own settings.
-        // In that case keep the proven vanilla/CBF tick driver.
-        return sip && sip->getSettingValue<bool>("mod-enabled");
-    }
-
-    bool isCBFLoaded() const {
-        auto* loader = Loader::get();
-        if (!loader) return false;
-        return loader->getLoadedMod("syzzi.click_between_frames") != nullptr ||
-               loader->getLoadedMod("zmx.cbf-lite") != nullptr;
-    }
-
-    bool hasInputModConflict() const {
-        // CBF and SIP must never drive input timing at the same time.
-        return isSIPEnabled() && isCBFLoaded();
-    }
-
-    bool usesSIPTickClock() const {
-        // Don't switch the counter to SIP's clock simply because SIP is installed.
-        // If SIP is disabled, the original tick clock remains in charge.
-        return isSIPEnabled() && !isCBFLoaded();
-    }
-
     void onPlayerUpdate(PlayerObject* player) {
         PlayLayer* pl = PlayLayer::get();
         if (!pl || player != pl->m_player1) return;
-
-        if (GetAsyncKeyState(VK_F9) & 1) {
-            cyclePreset();
-        }
-
-        // SIP can subdivide Wave movement into several subtick segments. Its buffer
-        // countdown therefore uses processCommands rather than every PlayerObject::update.
+        if (GetAsyncKeyState(VK_F9) & 1) cyclePreset();
         if (usesSIPTickClock()) return;
         advanceBufferTick(player);
     }
 
-    void onSIPPhysicsTick() {
-        if (!usesSIPTickClock()) return;
-        PlayLayer* pl = PlayLayer::get();
-        if (!pl || !pl->m_player1) return;
-
-        // Poll the same hotkey here because SIP may replace PlayerObject::update.
-        if (GetAsyncKeyState(VK_F9) & 1) {
-            cyclePreset();
-        }
-        advanceBufferTick(pl->m_player1);
-    }
-
     void advanceBufferTick(PlayerObject* player) {
-        PlayLayer* pl = PlayLayer::get();
-        if (!pl || player != pl->m_player1 || !m_enabled) return;
+        if (!m_enabled) return;
 
         if (m_ticksSinceLastInput < 999) {
             m_ticksSinceLastInput++;
@@ -544,6 +546,8 @@ public:
             m_queuedOpposite = false;
             m_waitTicks = -1;
         } else if (m_waitTicks == -1) {
+            // FAILSAFE: When no buffer is active, guarantee the game's hold state
+            // matches your actual physical mouse button so Wave/Mini Wave can NEVER stay stuck holding!
             if (m_gameHolding != m_physicalHolding) {
                 m_SimFireButton(pl, m_physicalHolding);
             }
@@ -569,7 +573,7 @@ $on_mod(Loaded) {
     freopen_s(&f, "CONOUT$", "w", stdout);
     SetConsoleTitleA("Geode Predictive Input Buffer - Live Console");
     printf("============================================================\n");
-    printf(" [InputBuffer] v4.8 LOADED (Cube Prediction + SIP Tick Clock)\n");
+    printf(" [InputBuffer] v1.0.3 LOADED (Original timing + cube forecast + optional SIP)\n");
     printf(" [InputBuffer] Starting Mode: STAGE 1 (2 All / 2 Wave)\n");
     printf(" [InputBuffer] Press F9 in-level to cycle: 2/2 -> 4/4 -> 8/8 -> 16/16 -> 24/24 -> OFF\n");
     printf("============================================================\n");
@@ -672,7 +676,7 @@ class $modify(BufPlayerObject, PlayerObject) {
             s_sim.onPlayerUpdate(this);
         }
         PlayerObject::update(dt);
-        if (PlayLayer::get() && !s_sim.isSimulating() && !s_sim.usesSIPTickClock()) {
+        if (PlayLayer::get() && !s_sim.isSimulating()) {
             s_sim.setFrameDelta(dt);
         }
     }
@@ -686,8 +690,9 @@ class $modify(BufPlayerObject, PlayerObject) {
 class $modify(BufBaseGameLayer, GJBaseGameLayer) {
     static void onModify(auto& self) {
         (void)self.setHookPriority("GJBaseGameLayer::canBeActivatedByPlayer", -1000000);
+        (void)self.setHookPriority("GJBaseGameLayer::processQueuedButtons", Priority::First);
+        (void)self.setHookPriority("GJBaseGameLayer::processCommands", Priority::VeryEarly);
         (void)self.setHookPriority("GJBaseGameLayer::handleButton", -1000000);
-        (void)self.setHookPriority("GJBaseGameLayer::processCommands", -1000000);
         (void)self.setHookPriority("GJBaseGameLayer::collisionCheckObjects", -1000000);
         (void)self.setHookPriority("GJBaseGameLayer::playerTouchedRing", -1000000);
     }
@@ -697,15 +702,23 @@ class $modify(BufBaseGameLayer, GJBaseGameLayer) {
         return GJBaseGameLayer::canBeActivatedByPlayer(p0, p1);
     }
 
+    void processQueuedButtons(float dt, bool clearInputQueue) {
+        if (!s_sim.isSimulating() && s_sim.usesSIPTickClock()) {
+            s_sim.filterSIPInputQueue(dt);
+        }
+        GJBaseGameLayer::processQueuedButtons(dt, clearInputQueue);
+    }
+
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
-        if (!isHalfTick) {
-            s_sim.setFrameDelta(dt);
-            s_sim.onSIPPhysicsTick();
-        }
+        if (!isHalfTick) s_sim.onSIPPhysicsTick();
     }
 
     void handleButton(bool down, int button, bool isPlayer1) {
+        if (s_sim.usesSIPTickClock()) {
+            GJBaseGameLayer::handleButton(down, button, isPlayer1);
+            return;
+        }
         if (!s_sim.isSimulating() && !s_sim.isFiringBuffered() && button == 1 && PlayLayer::get()) {
             if (!s_sim.interceptInput(this, down, isPlayer1)) {
                 return;
