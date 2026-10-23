@@ -643,6 +643,23 @@ public:
                         m_rapidInputStreak = std::max(m_rapidInputStreak, SPAM_STREAK_REQUIRED - 1);
                     }
                 }
+            } else if (m_queuedOpposite) {
+                // Do not erase a pending release when another press arrives before the
+                // delayed press has been emitted. That sequence is press -> release -> press,
+                // not a duplicate press; collapsing it leaves Wave stuck or swallows a tap.
+                if (sipInput && sipOutput) {
+                    // SIP events must be replayed after the preserved opposite transition.
+                    m_sipInputsAfterOpposite.push_back(*sipInput);
+                    m_ticksSinceLastInput = 0;
+                    return false;
+                }
+
+                // Native input has no ratio queue. Flush the captured pair in order, then
+                // let this fresh input pass through normally so the latest physical state wins.
+                flushPendingInput(pl);
+                m_gameHolding = push;
+                m_ticksSinceLastInput = 0;
+                return true;
             } else {
                 m_queuedOpposite = false;
                 m_hasQueuedOppositeSIPInput = false;
