@@ -350,6 +350,7 @@ public:
         bool isWave = p1->m_isDart || (isDual && p2 && p2->m_isDart);
         bool isMiniWave = (p1->m_isDart && p1->m_vehicleSize < 1.0f) ||
                           (isDual && p2 && p2->m_isDart && p2->m_vehicleSize < 1.0f);
+        bool isCube = p1->isInNormalMode() && (!isDual || !p2 || p2->isInNormalMode());
 
         // 3. STREAK-BASED WAVE SPAM GUARD:
         // Only bypasses if you perform 3+ rapid inputs in a row (< 8 ticks apart).
@@ -419,7 +420,7 @@ public:
                     bestTicks = ticks;
                     break;
                 }
-                if (ticks > bestTicks + 12) {
+                if (!isCube && ticks > bestTicks + 12) {
                     bestDelay = delay;
                     bestTicks = ticks;
                 }
@@ -432,6 +433,11 @@ public:
             m_bufferedPush = push;
             m_waitTicks = bestDelay;
             return false;
+        }
+
+        if (isCube && push && ticksFrame0 < targetHorizon) {
+            printf("[InputBuffer] CUBE PREDICTION: immediate jump may die within %d ticks; no safe timing found within %d ticks.\\n",
+                targetHorizon, maxDelayFrames);
         }
 
         m_gameHolding = push;
@@ -459,7 +465,13 @@ public:
     void onSIPPhysicsTick() {
         if (!usesSIPTickClock()) return;
         PlayLayer* pl = PlayLayer::get();
-        if (pl && pl->m_player1) advanceBufferTick(pl->m_player1);
+        if (!pl || !pl->m_player1) return;
+
+        // Poll the same hotkey here because SIP may replace PlayerObject::update.
+        if (GetAsyncKeyState(VK_F9) & 1) {
+            cyclePreset();
+        }
+        advanceBufferTick(pl->m_player1);
     }
 
     void advanceBufferTick(PlayerObject* player) {
@@ -622,7 +634,7 @@ class $modify(BufPlayerObject, PlayerObject) {
             s_sim.onPlayerUpdate(this);
         }
         PlayerObject::update(dt);
-        if (PlayLayer::get() && !s_sim.isSimulating()) {
+        if (PlayLayer::get() && !s_sim.isSimulating() && !s_sim.usesSIPTickClock()) {
             s_sim.setFrameDelta(dt);
         }
     }
