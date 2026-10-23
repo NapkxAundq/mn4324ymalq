@@ -497,8 +497,10 @@ public:
         PlayLayer* pl = PlayLayer::get();
         if (!pl) return true;
 
-        bool isDual = pl->m_gameState.m_isDualMode && pl->m_player2 != nullptr;
         bool isTwoPlayerControl = pl->m_level && pl->m_level->m_twoPlayerMode;
+        // The trajectory clone mirrors both players only in shared-control Dual mode.
+        // In 2-player-control levels, player 1's input must not be simulated on player 2.
+        bool isDual = pl->m_gameState.m_isDualMode && pl->m_player2 != nullptr && !isTwoPlayerControl;
 
         // Keep Player 2 synced with Player 1 in 1-player Dual mode
         if (!isPlayer1) {
