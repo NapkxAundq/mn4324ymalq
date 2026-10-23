@@ -25,8 +25,8 @@ using namespace geode::prelude;
 // This keeps isolated micro-clicks and spike/sawblade dodges 100% protected!
 constexpr int SPAM_INTERVAL_TICKS = 8;
 constexpr int SPAM_STREAK_REQUIRED = 3;
-// A Wave press/release pair this close together is precision input, not spam to delay.
-constexpr int WAVE_MICROCLICK_MAX_TICKS = 4;
+// Short input pairs are precision corrections. Never let a pending prediction stretch them.
+constexpr int MICROCLICK_MAX_TICKS = 4;
 
 // Cap the time spent comparing candidate delays. The budget is checked between simulations,
 // never mid-simulation; hitting it fails open (the live input passes through).
@@ -623,10 +623,12 @@ public:
         bool isMiniWave = (p1->m_isDart && p1->m_vehicleSize < 1.0f) ||
                           (isDual && p2 && p2->m_isDart && p2->m_vehicleSize < 1.0f);
         bool isCube = p1->isInNormalMode() && (!isDual || !p2 || p2->isInNormalMode());
+        bool releaseAffectsPhysics = p1->m_isDart || p1->m_isRobot ||
+                                     (isDual && p2 && (p2->m_isDart || p2->m_isRobot));
 
-        // 2. While a prediction is pending, never leave a short Wave transition queued
-        // for the full delay. Convert a rapid opposite input into a minimum one-tick pulse.
-        // SIP needs one countdown tick to stage the action for its next queue-processing phase.
+        // 2. A short opposite event ends the pending press/release pair in every mode.
+        // Otherwise even a Cube tap can remain logically held during the selected delay.
+        // SIP needs one countdown tick to stage the event in its next queue phase.
         if (m_waitTicks >= 0) {
             if (push != m_bufferedPush) {
                 m_queuedOpposite = true;
@@ -635,9 +637,11 @@ public:
                     m_hasQueuedOppositeSIPInput = true;
                 }
 
-                if (isWave && m_ticksSinceLastInput <= WAVE_MICROCLICK_MAX_TICKS) {
+                if (m_ticksSinceLastInput <= MICROCLICK_MAX_TICKS) {
                     m_waitTicks = sipOutput ? 1 : 0;
-                    m_rapidInputStreak = std::max(m_rapidInputStreak, SPAM_STREAK_REQUIRED - 1);
+                    if (isWave) {
+                        m_rapidInputStreak = std::max(m_rapidInputStreak, SPAM_STREAK_REQUIRED - 1);
+                    }
                 }
             } else {
                 m_queuedOpposite = false;
@@ -679,11 +683,13 @@ public:
             m_sipReadyAction = false;
         }
 
-        // A short Wave release after an input that already reached the game must pass
-        // through unchanged. Otherwise the prediction could stretch a microclick into a hold.
-        if (isWave && !push && m_ticksSinceLastInput <= WAVE_MICROCLICK_MAX_TICKS) {
+        // Releases that change physics (Wave and Robot) are latency-sensitive. When a
+        // short press has already reached the game, never re-buffer its release in any stage.
+        if (!push && releaseAffectsPhysics && m_ticksSinceLastInput <= MICROCLICK_MAX_TICKS) {
             m_gameHolding = false;
-            m_rapidInputStreak = std::max(m_rapidInputStreak, SPAM_STREAK_REQUIRED - 1);
+            if (isWave) {
+                m_rapidInputStreak = std::max(m_rapidInputStreak, SPAM_STREAK_REQUIRED - 1);
+            }
             m_ticksSinceLastInput = 0;
             return true;
         }
@@ -704,9 +710,7 @@ public:
             return true;
         }
 
-        // Only Wave (m_isDart) and Robot (m_isRobot) change trajectory on RELEASE
-        bool releaseAffectsPhysics = p1->m_isDart || p1->m_isRobot ||
-                                     (isDual && p2 && (p2->m_isDart || p2->m_isRobot));
+        // Only Wave (m_isDart) and Robot (m_isRobot) change trajectory on RELEASE.
         if (!push && !releaseAffectsPhysics) {
             m_gameHolding = false;
             return true;
@@ -733,9 +737,12 @@ public:
         // Never hitch the game indefinitely when every candidate requires a full simulation.
         // Start just before the first forecast and only stop between candidate trajectories.
         const auto simulationStart = std::chrono::steady_clock::now();
+        // Wave gets a slightly larger but still bounded window at 16/24 ticks because
+        // its 65-tick horizon otherwise tends to test only the first few input timings.
+        const double inputBudgetMs = (isWave && conservativeHighDelay) ? 70.0 : SIMULATION_BUDGET_MS;
         auto simulationBudgetExceeded = [&]() {
             return std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - simulationStart).count() >= SIMULATION_BUDGET_MS;
+                std::chrono::steady_clock::now() - simulationStart).count() >= inputBudgetMs;
         };
 
         // 4. Check Frame 0 (immediate input) across the full trajectory horizon
@@ -768,13 +775,16 @@ public:
                 delayCandidates.push_back(delay);
             }
         };
-        // Long stages used to spend nearly the whole search budget on delays 1..4.
-        // Probe across the permitted window first, then refine in ascending order as budget allows.
+        // Test fine corrections first at every stage, then sample the middle/end of long
+        // windows so a bounded scan is not restricted to either tiny or huge delays.
+        for (int delay = 1; delay <= std::min(4, maxDelayFrames); ++delay) addDelayCandidate(delay);
+        addDelayCandidate((maxDelayFrames + 1) / 2);
+        addDelayCandidate((maxDelayFrames * 3 + 3) / 4);
+        addDelayCandidate(maxDelayFrames);
         if (conservativeHighDelay) {
-            addDelayCandidate(1);
+            addDelayCandidate(maxDelayFrames / 4);
             addDelayCandidate(maxDelayFrames / 3);
             addDelayCandidate((maxDelayFrames * 2) / 3);
-            addDelayCandidate(maxDelayFrames);
         }
         for (int delay = 1; delay <= maxDelayFrames; ++delay) addDelayCandidate(delay);
 
@@ -802,7 +812,11 @@ public:
                 // Preserve LilWC's threshold and partial-improvement fallback. The fallback
                 // is important on levels where every candidate encounters a later hazard.
                 int minClearedGain = (delay * 2) + 10;
-                if (ticks >= targetHorizon && (ticks - ticksFrame0) >= (delay * 2) + 6) {
+                // In high-delay stages, full-horizon survival is the safety criterion.
+                // The old delay-proportional gain threshold could reject even a fully safe
+                // timing (especially at 24 ticks), making those stages feel no better.
+                if (ticks >= targetHorizon &&
+                    (conservativeHighDelay || (ticks - ticksFrame0) >= (delay * 2) + 6)) {
                     if (bestDelay == 0 || delay < bestDelay) {
                         bestDelay = delay;
                         bestTicks = ticks;
