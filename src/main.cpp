@@ -29,12 +29,16 @@ constexpr int SPAM_STREAK_REQUIRED = 3;
 
 class TrajectoryBufferSim {
 private:
+    using SIPInput = subtickinputs::PlayerButtonCommandWithRatio;
+    using SIPInputQueue = std::vector<SIPInput>;
+
     PlayerObject* m_simPlayer1 = nullptr;
     PlayerObject* m_simPlayer2 = nullptr;
 
     bool m_simulating = false;
     bool m_firingBuffered = false;
     bool m_simulationDead = false;
+    bool m_simulationUnsupported = false;
     bool m_warnedInputModConflict = false;
 
     // Tracks actual physical mouse state vs what PlayLayer currently has active
@@ -51,6 +55,14 @@ private:
     int  m_waitTicks = -1;          // -1 = inactive, >= 0 = countdown ticks, -2 = queued opposite tick
     bool m_bufferedPush = true;     // true = buffered PRESS, false = buffered RELEASE
     bool m_queuedOpposite = false;  // true if user quickly released/re-pressed during wait
+
+    // SIP commands retain their sub-tick ratio when moved to a later physics tick.
+    bool m_hasBufferedSIPInput = false;
+    bool m_hasQueuedOppositeSIPInput = false;
+    bool m_sipReadyAction = false;
+    bool m_sipReadyPush = true;
+    SIPInput m_bufferedSIPInput{};
+    SIPInput m_queuedOppositeSIPInput{};
     float m_frameDt = 0.25f;        // GD 240 TPS normalized dt is 0.25f
 
     // Streak-based Spam Guard state
@@ -97,6 +109,58 @@ private:
         sim->m_playerSpeed = real->m_playerSpeed;
     }
 
+    void clearPendingInput() {
+        m_waitTicks = -1;
+        m_queuedOpposite = false;
+        m_hasBufferedSIPInput = false;
+        m_hasQueuedOppositeSIPInput = false;
+        m_sipReadyAction = false;
+    }
+
+    void appendSIPAction(PlayLayer* pl, SIPInputQueue& output, SIPInput source, bool push,
+                         std::vector<std::pair<double, bool>>* fallbackActions = nullptr) {
+        source.input.m_button = 1;
+        source.input.m_isPush = push;
+        source.input.m_isPlayer2 = false;
+        output.push_back(source);
+        if (fallbackActions) fallbackActions->push_back({source.ratio, push});
+
+        if (pl && pl->m_gameState.m_isDualMode && (!pl->m_level || !pl->m_level->m_twoPlayerMode)) {
+            source.input.m_isPlayer2 = true;
+            output.push_back(source);
+        }
+        m_gameHolding = push;
+    }
+
+    void flushPendingInput(PlayLayer* pl, SIPInputQueue* sipOutput = nullptr,
+                           std::vector<std::pair<double, bool>>* fallbackActions = nullptr) {
+        if (!pl) {
+            clearPendingInput();
+            return;
+        }
+
+        auto emit = [&](bool push, SIPInput const* source) {
+            if (sipOutput && source) {
+                appendSIPAction(pl, *sipOutput, *source, push, fallbackActions);
+            } else {
+                m_SimFireButton(pl, push);
+                if (fallbackActions) fallbackActions->push_back({0.0, push});
+            }
+        };
+
+        if (m_waitTicks >= 0) {
+            emit(m_bufferedPush, m_hasBufferedSIPInput ? &m_bufferedSIPInput : nullptr);
+            if (m_queuedOpposite) {
+                emit(!m_bufferedPush, m_hasQueuedOppositeSIPInput ? &m_queuedOppositeSIPInput : nullptr);
+            }
+        } else if (m_waitTicks == -2 || m_sipReadyAction) {
+            emit(!m_bufferedPush,
+                 m_hasQueuedOppositeSIPInput ? &m_queuedOppositeSIPInput :
+                 (m_hasBufferedSIPInput ? &m_bufferedSIPInput : nullptr));
+        }
+        clearPendingInput();
+    }
+
     float getValidDt() const {
         if (m_frameDt > 0.001f && m_frameDt < 2.0f) {
             return m_frameDt;
@@ -111,8 +175,7 @@ public:
 
         m_simPlayer1 = createTrajectoryPlayer();
         m_simPlayer2 = createTrajectoryPlayer();
-        m_waitTicks = -1;
-        m_queuedOpposite = false;
+        clearPendingInput();
         m_physicalHolding = false;
         m_gameHolding = false;
         m_simulating = false;
@@ -120,6 +183,7 @@ public:
         m_ticksSinceLastInput = 999;
         m_rapidInputStreak = 0;
         m_warnedInputModConflict = false;
+        m_simulationUnsupported = false;
     }
 
     void quit() {
@@ -133,16 +197,27 @@ public:
         }
         m_simulating = false;
         m_firingBuffered = false;
-        m_waitTicks = -1;
-        m_queuedOpposite = false;
+        clearPendingInput();
         m_rapidInputStreak = 0;
+        m_simulationUnsupported = false;
+        if (m_simPlayer1) {
+            if (m_simPlayer1->getParent()) m_simPlayer1->removeFromParentAndCleanup(true);
+            m_simPlayer1->release();
+            m_simPlayer1 = nullptr;
+        }
+        if (m_simPlayer2) {
+            if (m_simPlayer2->getParent()) m_simPlayer2->removeFromParentAndCleanup(true);
+            m_simPlayer2->release();
+            m_simPlayer2 = nullptr;
+        }
     }
 
     // F9 cycles through 2, 4, 8, 16, 24 ticks, then OFF.
-    void cyclePreset() {
+    // Flush a captured input before changing presets so it is not silently discarded.
+    void cyclePreset(SIPInputQueue* sipOutput = nullptr,
+                     std::vector<std::pair<double, bool>>* fallbackActions = nullptr) {
+        flushPendingInput(PlayLayer::get(), sipOutput, fallbackActions);
         m_presetIndex = (m_presetIndex + 1) % 6;
-        m_waitTicks = -1;
-        m_queuedOpposite = false;
         switch (m_presetIndex) {
             case 0:
                 m_enabled = true; m_maxTicksNormal = 2; m_maxTicksWave = 2;
@@ -168,6 +243,14 @@ public:
 
     bool isSimulating() const { return m_simulating; }
     bool isFiringBuffered() const { return m_firingBuffered; }
+    bool isSimulatedPlayer(PlayerObject* player) const {
+        return player && (player == m_simPlayer1 || player == m_simPlayer2);
+    }
+    void markSimulationUnsupported(PlayerObject* player = nullptr) {
+        if (m_simulating && (!player || isSimulatedPlayer(player))) {
+            m_simulationUnsupported = true;
+        }
+    }
 
     bool checkSimulationDeath(PlayerObject* player) {
         if (m_simulating && (player == m_simPlayer1 || player == m_simPlayer2)) {
@@ -175,8 +258,7 @@ public:
             return true;
         }
         // Real player died -> clear any pending buffer so respawn is 100% clean
-        m_waitTicks = -1;
-        m_queuedOpposite = false;
+        clearPendingInput();
         m_gameHolding = false;
         m_rapidInputStreak = 0;
         return false;
@@ -192,96 +274,65 @@ public:
     }
 
     int getSurvivalTicks(PlayLayer* pl, PlayerObject* realP1, PlayerObject* realP2, bool isDual, int delayFrames, bool actionPush, int maxTicks) {
-        if (!pl || !m_simPlayer1 || !realP1) return maxTicks;
+        // Missing simulation data must never be interpreted as a safe trajectory.
+        if (!pl || !m_simPlayer1 || !realP1 || (isDual && (!m_simPlayer2 || !realP2))) return -1;
 
         m_simulating = true;
         m_simulationDead = false;
+        m_simulationUnsupported = false;
 
         syncSimPlayer(m_simPlayer1, realP1);
-        if (isDual && m_simPlayer2 && realP2) {
-            syncSimPlayer(m_simPlayer2, realP2);
-        }
+        if (isDual) syncSimPlayer(m_simPlayer2, realP2);
 
-        // Before delayFrames, maintain the pre-input button state
+        // Recreate the button state that precedes this hypothetical transition.
         if (delayFrames > 0) {
             if (!actionPush) {
                 m_simPlayer1->pushButton(PlayerButton::Jump);
-                if (isDual && m_simPlayer2) {
-                    m_simPlayer2->pushButton(PlayerButton::Jump);
-                }
+                if (isDual) m_simPlayer2->pushButton(PlayerButton::Jump);
             } else {
                 m_simPlayer1->releaseButton(PlayerButton::Jump);
-                if (isDual && m_simPlayer2) {
-                    m_simPlayer2->releaseButton(PlayerButton::Jump);
-                }
+                if (isDual) m_simPlayer2->releaseButton(PlayerButton::Jump);
             }
         }
 
         float dt = getValidDt();
         int survived = 0;
-        // Robot and Ball need a full forward simulation too: landing briefly is not
-        // proof that a delayed input survives the upcoming section.
-        bool requiresFullHorizonSimulation = realP1->m_isDart || realP1->m_isBird || realP1->m_isSwing ||
-                                realP1->m_isRobot || realP1->m_isBall ||
-                                (isDual && realP2 && (realP2->m_isDart || realP2->m_isBird || realP2->m_isSwing ||
-                                                      realP2->m_isRobot || realP2->m_isBall));
-        int airborneTicks = 0;
-        int safeLandedTicks = 0;
 
+        // A brief landing is not proof of full-horizon survival. Run the complete forecast.
         for (int i = 0; i < delayFrames + maxTicks; i++) {
             if (i == delayFrames) {
                 if (actionPush) {
                     m_simPlayer1->pushButton(PlayerButton::Jump);
-                    if (isDual && m_simPlayer2) {
-                        m_simPlayer2->pushButton(PlayerButton::Jump);
-                    }
+                    if (isDual) m_simPlayer2->pushButton(PlayerButton::Jump);
                 } else {
                     m_simPlayer1->releaseButton(PlayerButton::Jump);
-                    if (isDual && m_simPlayer2) {
-                        m_simPlayer2->releaseButton(PlayerButton::Jump);
-                    }
+                    if (isDual) m_simPlayer2->releaseButton(PlayerButton::Jump);
                 }
             }
 
             m_simPlayer1->update(dt);
             m_simPlayer1->updateRotation(dt);
-            if (isDual && m_simPlayer2) {
+            if (isDual) {
                 m_simPlayer2->update(dt);
                 m_simPlayer2->updateRotation(dt);
             }
-            if (m_simulationDead) break;
+            if (m_simulationDead || m_simulationUnsupported) break;
 
             resetCollisionLog(m_simPlayer1);
             pl->checkCollisions(m_simPlayer1, dt, false);
-            if (m_simulationDead) break;
+            if (m_simulationDead || m_simulationUnsupported) break;
 
-            if (isDual && m_simPlayer2 && realP2) {
+            if (isDual) {
                 resetCollisionLog(m_simPlayer2);
                 pl->checkCollisions(m_simPlayer2, dt, false);
-                if (m_simulationDead) break;
+                if (m_simulationDead || m_simulationUnsupported) break;
             }
 
-            if (i >= delayFrames) {
-                survived++;
-                if (!requiresFullHorizonSimulation) {
-                    bool p1Grounded = m_simPlayer1->m_isOnGround;
-                    bool p2Grounded = (!isDual || !m_simPlayer2) ? true : m_simPlayer2->m_isOnGround;
-                    if (!p1Grounded || !p2Grounded) {
-                        airborneTicks++;
-                        safeLandedTicks = 0;
-                    } else if (airborneTicks >= 15) {
-                        safeLandedTicks++;
-                        if (safeLandedTicks >= 10) {
-                            survived = maxTicks;
-                            break;
-                        }
-                    }
-                }
-            }
+            if (i >= delayFrames) survived++;
         }
 
         m_simulating = false;
-        return survived;
+        return m_simulationUnsupported ? -1 : survived;
     }
 
     bool isSIPEnabled() const {
@@ -309,26 +360,76 @@ public:
 
     bool filterSIPInputQueue(float dt) {
         if (!usesSIPTickClock() || m_simulating || dt <= 0.f) return false;
+        auto* pl = PlayLayer::get();
+        if (!pl || !pl->m_player1) return false;
+
         auto queueResult = subtickinputs::getInputQueueWithRatios(dt);
         if (queueResult.isErr()) {
-            log::warn("SIP queue API unavailable; leaving raw inputs untouched");
+            log::warn("SIP queue API unavailable; flushing any captured input and leaving raw queue untouched");
+            flushPendingInput(pl);
+            if (GetAsyncKeyState(VK_F9) & 1) cyclePreset();
             return false;
         }
+
         auto queueWithRatios = queueResult.unwrap();
-        std::vector<subtickinputs::PlayerButtonCommandWithRatio> filtered;
-        filtered.reserve(queueWithRatios.size());
-        auto* pl = PlayLayer::get();
-        if (!pl) return false;
+        SIPInputQueue filtered;
+        filtered.reserve(queueWithRatios.size() + 4);
+        std::vector<std::pair<double, bool>> fallbackActions;
+
+        // Only this path owns F9 while SIP is active.
+        if (GetAsyncKeyState(VK_F9) & 1) cyclePreset(&filtered, &fallbackActions);
+
+        // Emit an action whose delay elapsed on the previous physics tick at its original
+        // sub-tick ratio, before processing newer inputs from this tick.
+        if (m_sipReadyAction) {
+            SIPInput const* source = (m_sipReadyPush == m_bufferedPush)
+                ? (m_hasBufferedSIPInput ? &m_bufferedSIPInput : nullptr)
+                : (m_hasQueuedOppositeSIPInput ? &m_queuedOppositeSIPInput : nullptr);
+            if (source) {
+                appendSIPAction(pl, filtered, *source, m_sipReadyPush, &fallbackActions);
+            } else {
+                // Fail open rather than silently lose an input if a command was not captured.
+                m_SimFireButton(pl, m_sipReadyPush);
+                fallbackActions.push_back({0.0, m_sipReadyPush});
+            }
+
+            m_sipReadyAction = false;
+            if (m_sipReadyPush == m_bufferedPush && m_queuedOpposite) {
+                m_waitTicks = -2;
+                m_queuedOpposite = false;
+            } else {
+                clearPendingInput();
+            }
+        }
+
         for (auto& item : queueWithRatios) {
             bool keepInput = true;
             if (static_cast<int>(item.input.m_button) == 1) {
-                keepInput = interceptInput(pl, item.input.m_isPush, !item.input.m_isPlayer2);
+                keepInput = interceptInput(pl, item.input.m_isPush, !item.input.m_isPlayer2,
+                                           &item, &filtered, &fallbackActions);
             }
             if (keepInput) filtered.push_back(item);
         }
+
+        // setInputQueueWithRatios timestamps by ratio; keep commands in chronological order.
+        std::stable_sort(filtered.begin(), filtered.end(), [](SIPInput const& a, SIPInput const& b) {
+            return a.ratio < b.ratio;
+        });
+
         auto setResult = subtickinputs::setInputQueueWithRatios(std::move(filtered), dt);
         if (setResult.isErr()) {
-            log::warn("SIP rejected the filtered input queue; inputs were not delayed this tick");
+            log::warn("SIP rejected the filtered queue; replaying already-due buffered actions and passing this tick's raw inputs through");
+            std::stable_sort(fallbackActions.begin(), fallbackActions.end(),
+                [](auto const& a, auto const& b) { return a.first < b.first; });
+            for (auto const& action : fallbackActions) m_SimFireButton(pl, action.second);
+            clearPendingInput();
+            m_rapidInputStreak = 0;
+            for (auto const& item : queueWithRatios) {
+                if (static_cast<int>(item.input.m_button) == 1 && !item.input.m_isPlayer2) {
+                    m_physicalHolding = item.input.m_isPush;
+                }
+            }
+            m_gameHolding = m_physicalHolding;
             return false;
         }
         return true;
@@ -337,12 +438,36 @@ public:
     void onSIPPhysicsTick() {
         if (!usesSIPTickClock()) return;
         auto* pl = PlayLayer::get();
-        if (!pl || !pl->m_player1) return;
-        if (GetAsyncKeyState(VK_F9) & 1) cyclePreset();
-        advanceBufferTick(pl->m_player1);
+        if (!pl || !pl->m_player1 || !m_enabled) return;
+
+        if (m_ticksSinceLastInput < 999) m_ticksSinceLastInput++;
+
+        // SIP processes the queue before processCommands. Mark an expiring action ready here;
+        // it is injected at its preserved ratio in the next queue-processing phase.
+        if (pl->m_player1->m_isShip ||
+            (pl->m_gameState.m_isDualMode && pl->m_player2 && pl->m_player2->m_isShip)) {
+            clearPendingInput();
+            if (m_gameHolding != m_physicalHolding) m_SimFireButton(pl, m_physicalHolding);
+            return;
+        }
+
+        if (m_waitTicks > 0) {
+            --m_waitTicks;
+            if (m_waitTicks == 0) {
+                m_sipReadyAction = true;
+                m_sipReadyPush = m_bufferedPush;
+            }
+        } else if (m_waitTicks == -2) {
+            m_sipReadyAction = true;
+            m_sipReadyPush = !m_bufferedPush;
+        } else if (m_waitTicks == -1 && m_gameHolding != m_physicalHolding) {
+            m_SimFireButton(pl, m_physicalHolding);
+        }
     }
 
-    bool interceptInput(GJBaseGameLayer* layer, bool push, bool isPlayer1) {
+    bool interceptInput(GJBaseGameLayer* layer, bool push, bool isPlayer1,
+                        SIPInput const* sipInput = nullptr, SIPInputQueue* sipOutput = nullptr,
+                        std::vector<std::pair<double, bool>>* fallbackActions = nullptr) {
         PlayLayer* pl = PlayLayer::get();
         if (!pl) return true;
 
@@ -398,8 +523,13 @@ public:
         if (m_waitTicks >= 0) {
             if (push != m_bufferedPush) {
                 m_queuedOpposite = true;
+                if (sipInput) {
+                    m_queuedOppositeSIPInput = *sipInput;
+                    m_hasQueuedOppositeSIPInput = true;
+                }
             } else {
                 m_queuedOpposite = false;
+                m_hasQueuedOppositeSIPInput = false;
             }
             m_ticksSinceLastInput = 0;
             return false;
@@ -408,22 +538,28 @@ public:
         // If a queued opposite action is due to fire on the next tick (m_waitTicks == -2)
         // and the user clicks again, fire the pending opposite action first
         if (m_waitTicks == -2) {
+            bool fireOpposite = m_gameHolding != !m_bufferedPush;
+            SIPInput queuedOpposite = m_queuedOppositeSIPInput;
+            bool hasQueuedOpposite = m_hasQueuedOppositeSIPInput;
             m_waitTicks = -1;
             m_queuedOpposite = false;
-            if (m_gameHolding != !m_bufferedPush) {
-                m_SimFireButton(pl, !m_bufferedPush);
+            m_hasQueuedOppositeSIPInput = false;
+            if (fireOpposite) {
+                if (sipOutput && hasQueuedOpposite) {
+                    appendSIPAction(pl, *sipOutput, queuedOpposite, !m_bufferedPush, fallbackActions);
+                } else {
+                    m_SimFireButton(pl, !m_bufferedPush);
+                    if (fallbackActions) fallbackActions->push_back({sipInput ? sipInput->ratio : 0.0, !m_bufferedPush});
+                }
             }
+            m_hasBufferedSIPInput = false;
+            m_sipReadyAction = false;
         }
 
         bool isWave = p1->m_isDart || (isDual && p2 && p2->m_isDart);
         bool isMiniWave = (p1->m_isDart && p1->m_vehicleSize < 1.0f) ||
                           (isDual && p2 && p2->m_isDart && p2->m_vehicleSize < 1.0f);
         bool isCube = p1->isInNormalMode() && (!isDual || !p2 || p2->isInNormalMode());
-        bool isRobot = p1->m_isRobot || (isDual && p2 && p2->m_isRobot);
-        bool isBall = p1->m_isBall || (isDual && p2 && p2->m_isBall);
-        bool isUfo = p1->m_isBird || (isDual && p2 && p2->m_isBird);
-        // For these modes, extra survival time is not enough. Only block the real
-        // input when a candidate delay survives the entire prediction horizon.
 
         // 3. STREAK-BASED WAVE SPAM GUARD:
         // Only bypasses if you perform 3+ rapid inputs in a row (< 8 ticks apart).
@@ -431,7 +567,8 @@ public:
         if (m_ticksSinceLastInput < SPAM_INTERVAL_TICKS) {
             m_rapidInputStreak++;
         } else {
-            m_rapidInputStreak = 0;
+            // Count this event as the first input in a fresh burst.
+            m_rapidInputStreak = 1;
         }
         m_ticksSinceLastInput = 0;
 
@@ -462,6 +599,12 @@ public:
             m_gameHolding = push;
             return true;
         }
+        // If the path touches unsupported trigger logic, do not let a guessed trajectory
+        // delay an input. Pass through the player's actual command instead.
+        if (ticksFrame0 < 0) {
+            m_gameHolding = push;
+            return true;
+        }
 
         // 5. Frame 0 hits a spike, sawblade, or slope within the horizon!
         // Scan +1..maxDelayFrames for the earliest delay that genuinely clears the obstacle.
@@ -471,32 +614,14 @@ public:
         for (int delay = 1; delay <= maxDelayFrames; delay++) {
             int ticks = getSurvivalTicks(pl, p1, p2, isDual, delay, push, targetHorizon);
 
-            if (isWave) {
-                // In Wave mode, delaying a turn inside a flat corridor naturally adds ~(2 * delay)
-                // ticks against the opposite wall. Require at least (2 * delay + 10) extra ticks
-                // so we ONLY buffer when the delayed trajectory actually clears past a spike,
-                // sawblade, or corner!
-                int minClearedGain = (delay * 2) + 10;
-                if (ticks >= targetHorizon && (ticks - ticksFrame0) >= (delay * 2) + 6) {
-                    bestDelay = delay;
-                    bestTicks = ticks;
-                    break;
-                }
-                if (ticks >= ticksFrame0 + minClearedGain && ticks > bestTicks + 2) {
-                    bestDelay = delay;
-                    bestTicks = ticks;
-                    if (ticks >= targetHorizon) break;
-                }
-            } else {
-                if (ticks >= targetHorizon) {
-                    bestDelay = delay;
-                    bestTicks = ticks;
-                    break;
-                }
-                if (!(isCube || isRobot || isBall || isUfo) && ticks > bestTicks + 12) {
-                    bestDelay = delay;
-                    bestTicks = ticks;
-                }
+            // Never report a "save" just because a delayed path dies later than the original.
+            // The candidate must survive the full horizon. Wave also keeps a stricter gain
+            // threshold to avoid treating a flat-corridor timing shift as a genuine save.
+            if (ticks >= targetHorizon &&
+                (!isWave || (ticks - ticksFrame0) >= (delay * 2) + 10)) {
+                bestDelay = delay;
+                bestTicks = ticks;
+                break;
             }
         }
 
@@ -505,6 +630,14 @@ public:
                 bestDelay, bestDelay / 4.0f, act, ticksFrame0, bestTicks, maxDelayFrames);
             m_bufferedPush = push;
             m_waitTicks = bestDelay;
+            if (sipInput) {
+                m_bufferedSIPInput = *sipInput;
+                m_hasBufferedSIPInput = true;
+            } else {
+                m_hasBufferedSIPInput = false;
+            }
+            m_hasQueuedOppositeSIPInput = false;
+            m_sipReadyAction = false;
             return false;
         }
 
@@ -520,8 +653,8 @@ public:
     void onPlayerUpdate(PlayerObject* player) {
         PlayLayer* pl = PlayLayer::get();
         if (!pl || player != pl->m_player1) return;
-        if (GetAsyncKeyState(VK_F9) & 1) cyclePreset();
         if (usesSIPTickClock()) return;
+        if (GetAsyncKeyState(VK_F9) & 1) cyclePreset();
         advanceBufferTick(player);
     }
 
@@ -535,8 +668,7 @@ public:
         }
 
         if (player->m_isShip || (pl->m_gameState.m_isDualMode && pl->m_player2 && pl->m_player2->m_isShip)) {
-            m_waitTicks = -1;
-            m_queuedOpposite = false;
+            clearPendingInput();
             if (m_gameHolding != m_physicalHolding) {
                 m_SimFireButton(pl, m_physicalHolding);
             }
@@ -549,14 +681,13 @@ public:
                 m_waitTicks = -2;
                 m_queuedOpposite = false;
             } else {
-                m_waitTicks = -1;
+                clearPendingInput();
             }
         } else if (m_waitTicks > 0) {
             m_waitTicks--;
         } else if (m_waitTicks == -2) {
             m_SimFireButton(pl, !m_bufferedPush);
-            m_queuedOpposite = false;
-            m_waitTicks = -1;
+            clearPendingInput();
         } else if (m_waitTicks == -1) {
             // FAILSAFE: When no buffer is active, guarantee the game's hold state
             // matches your actual physical mouse button so Wave/Mini Wave can NEVER stay stuck holding!
@@ -585,7 +716,7 @@ $on_mod(Loaded) {
     freopen_s(&f, "CONOUT$", "w", stdout);
     SetConsoleTitleA("Geode Predictive Input Buffer - Live Console");
     printf("============================================================\n");
-    printf(" [InputBuffer] v1.0.4 LOADED (Conservative Robot/Ball prediction + cube/UFO checks)\n");
+    printf(" [InputBuffer] v1.0.5 LOADED (Full-horizon safety + SIP ratio preservation)\n");
     printf(" [InputBuffer] Starting Mode: STAGE 1 (2 All / 2 Wave)\n");
     printf(" [InputBuffer] Press F9 in-level to cycle: 2/2 -> 4/4 -> 8/8 -> 16/16 -> 24/24 -> OFF\n");
     printf("============================================================\n");
@@ -615,7 +746,10 @@ class $modify(BufPlayLayer, PlayLayer) {
     }
 
     void flipGravity(PlayerObject* p0, bool p1, bool p2) {
-        if (s_sim.isSimulating()) return;
+        if (s_sim.isSimulating()) {
+            s_sim.markSimulationUnsupported(p0);
+            return;
+        }
         PlayLayer::flipGravity(p0, p1, p2);
     }
 
@@ -650,7 +784,10 @@ class $modify(BufEffectGameObject, EffectGameObject) {
     }
 
     void triggerObject(GJBaseGameLayer* p0, int p1, const gd::vector<int>* p2) {
-        if (s_sim.isSimulating()) return;
+        if (s_sim.isSimulating()) {
+            s_sim.markSimulationUnsupported();
+            return;
+        }
         EffectGameObject::triggerObject(p0, p1, p2);
     }
 };
@@ -694,7 +831,10 @@ class $modify(BufPlayerObject, PlayerObject) {
     }
 
     void ringJump(RingObject* p0, bool p1) {
-        if (s_sim.isSimulating()) return;
+        if (s_sim.isSimulating()) {
+            s_sim.markSimulationUnsupported(this);
+            return;
+        }
         PlayerObject::ringJump(p0, p1);
     }
 };
@@ -710,7 +850,10 @@ class $modify(BufBaseGameLayer, GJBaseGameLayer) {
     }
 
     bool canBeActivatedByPlayer(PlayerObject* p0, EffectGameObject* p1) {
-        if (s_sim.isSimulating()) return false;
+        if (s_sim.isSimulating()) {
+            s_sim.markSimulationUnsupported(p0);
+            return false;
+        }
         return GJBaseGameLayer::canBeActivatedByPlayer(p0, p1);
     }
 
@@ -761,7 +904,10 @@ class $modify(BufBaseGameLayer, GJBaseGameLayer) {
     }
 
     void playerTouchedRing(PlayerObject* player, RingObject* ring) {
-        if (s_sim.isSimulating()) return;
+        if (s_sim.isSimulating()) {
+            s_sim.markSimulationUnsupported(player);
+            return;
+        }
         GJBaseGameLayer::playerTouchedRing(player, ring);
     }
 };
