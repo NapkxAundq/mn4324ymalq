@@ -604,7 +604,6 @@ public:
                           (isDual && p2 && p2->m_isDart && p2->m_vehicleSize < 1.0f);
 
         // 3. STREAK-BASED WAVE SPAM GUARD:
-        // 3. STREAK-BASED WAVE SPAM GUARD:
         // Only bypasses if you perform 3+ rapid inputs in a row (< 8 ticks apart).
         // Single micro-clicks and normal Wave turns around spikes/sawblades stay 100% active!
         if (m_ticksSinceLastInput < SPAM_INTERVAL_TICKS) {
@@ -620,6 +619,8 @@ public:
         }
 
         // Only Wave (m_isDart) and Robot (m_isRobot) change trajectory on RELEASE.
+        bool releaseAffectsPhysics = p1->m_isDart || p1->m_isRobot ||
+                                     (isDual && p2 && (p2->m_isDart || p2->m_isRobot));
         if (!push && !releaseAffectsPhysics) {
             m_gameHolding = false;
             return true;
