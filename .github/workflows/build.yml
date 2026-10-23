@@ -2,8 +2,7 @@ name: Build Predictive Input Buffer
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   workflow_dispatch:
 
 jobs:
@@ -14,18 +13,17 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build Geode mod
+        id: build
         uses: geode-sdk/build-geode-mod@main
         with:
+          sdk: given
           target: Win64
-          combine: true
-
-      - name: Package build
-        uses: geode-sdk/build-geode-mod/combine@main
-        id: build
+          build-config: Release
+          use-lto: false
 
       - name: Upload .geode artifact
         uses: actions/upload-artifact@v4
         with:
           name: Predictive-Input-Buffer-Windows
-          path: ${{ steps.build.outputs.build-output }}
+          path: ${{ steps.build.outputs.build-output }}/*.geode
           if-no-files-found: error
