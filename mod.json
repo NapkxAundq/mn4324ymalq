@@ -1,0 +1,17 @@
+{
+  "geode": "5.11.2",
+  "gd": {
+    "win": "2.2081"
+  },
+  "version": "v4.8.0",
+  "id": "ai.predictivebuffer",
+  "name": "Predictive Input Buffer",
+  "developer": "lilWC",
+  "description": "Trajectory-based input buffer with live-state jump prediction, F9 presets, and optional Superb Input Precision tick timing.",
+  "dependencies": {
+    "chizz.superb-input-precision": {
+      "version": ">=v0.1.4",
+      "required": false
+    }
+  }
+}
