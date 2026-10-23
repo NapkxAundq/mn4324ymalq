@@ -119,7 +119,7 @@ private:
 
     void appendSIPAction(PlayLayer* pl, SIPInputQueue& output, SIPInput source, bool push,
                          std::vector<std::pair<double, bool>>* fallbackActions = nullptr) {
-        source.input.m_button = 1;
+        source.input.m_button = PlayerButton::Jump;
         source.input.m_isPush = push;
         source.input.m_isPlayer2 = false;
         output.push_back(source);
@@ -395,7 +395,7 @@ public:
             } else if (m_hasBufferedSIPInput) {
                 source = m_bufferedSIPInput;
             }
-            source.input.m_button = 1;
+            source.input.m_button = PlayerButton::Jump;
             source.input.m_isPush = m_sipReadyPush;
             source.input.m_isPlayer2 = false;
             timeline.push_back({source, true, m_sipReadyPush});
