@@ -221,7 +221,7 @@ public:
         int survived = 0;
         // Robot and Ball need a full forward simulation too: landing briefly is not
         // proof that a delayed input survives the upcoming section.
-        bool isContinuousMode = realP1->m_isDart || realP1->m_isBird || realP1->m_isSwing ||
+        bool requiresFullHorizonSimulation = realP1->m_isDart || realP1->m_isBird || realP1->m_isSwing ||
                                 realP1->m_isRobot || realP1->m_isBall ||
                                 (isDual && realP2 && (realP2->m_isDart || realP2->m_isBird || realP2->m_isSwing ||
                                                       realP2->m_isRobot || realP2->m_isBall));
@@ -263,7 +263,7 @@ public:
 
             if (i >= delayFrames) {
                 survived++;
-                if (!isContinuousMode) {
+                if (!requiresFullHorizonSimulation) {
                     bool p1Grounded = m_simPlayer1->m_isOnGround;
                     bool p2Grounded = (!isDual || !m_simPlayer2) ? true : m_simPlayer2->m_isOnGround;
                     if (!p1Grounded || !p2Grounded) {
