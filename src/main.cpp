@@ -775,17 +775,17 @@ public:
                 delayCandidates.push_back(delay);
             }
         };
-        // Test fine corrections first at every stage, then sample the middle/end of long
-        // windows so a bounded scan is not restricted to either tiny or huge delays.
+        // Always start with fine corrections at every stage, then add a distributed
+        // sample of the available window before filling in the remaining delays.
+        // This lets stage 8 explore its upper half and stage 16/24 sample the full range
+        // when the per-input budget permits, without losing the guaranteed first four.
         for (int delay = 1; delay <= std::min(4, maxDelayFrames); ++delay) addDelayCandidate(delay);
+        addDelayCandidate((maxDelayFrames + 3) / 4);
+        addDelayCandidate((maxDelayFrames + 2) / 3);
         addDelayCandidate((maxDelayFrames + 1) / 2);
+        addDelayCandidate((maxDelayFrames * 2 + 2) / 3);
         addDelayCandidate((maxDelayFrames * 3 + 3) / 4);
         addDelayCandidate(maxDelayFrames);
-        if (conservativeHighDelay) {
-            addDelayCandidate(maxDelayFrames / 4);
-            addDelayCandidate(maxDelayFrames / 3);
-            addDelayCandidate((maxDelayFrames * 2) / 3);
-        }
         for (int delay = 1; delay <= maxDelayFrames; ++delay) addDelayCandidate(delay);
 
         int candidatesTested = 0;
@@ -795,7 +795,7 @@ public:
             if (candidatesTested >= 4 && simulationBudgetExceeded()) {
                 if (!m_warnedBudgetCutoff) {
                     printf("[InputBuffer] Forecast budget %.1f ms reached; stopping the delay scan for this level.\n",
-                        SIMULATION_BUDGET_MS);
+                        inputBudgetMs);
                     m_warnedBudgetCutoff = true;
                 }
                 break;
