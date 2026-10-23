@@ -3,11 +3,11 @@
   "gd": {
     "win": "2.2081"
   },
-  "version": "v1.0.8",
+  "version": "v1.0.9",
   "id": "ai.predictivebuffer",
   "name": "Predictive Input Buffer",
   "developer": "lilWC",
-  "description": "Audited predictive input buffer for Geometry Dash 2.2081: full-horizon safety checks, unmodelled-trigger guards, accurate gravity/speed state, bounded per-click simulation cost, hardened Dual-mode handling, F9 presets through 24 ticks, and optional Superb Input Precision beta.6 sub-tick input integration with ordered queued transitions.",
+  "description": "Predictive Input Buffer for Geometry Dash 2.2081: LilWC-compatible trajectory thresholds and landing detection, robust search across candidate delays, bounded per-click prediction cost, dual-mode fixes, and optional Superb Input Precision beta.6 integration.",
   "dependencies": {
     "chizz.superb-input-precision": {
       "version": ">=v1.0.0-beta.6",
