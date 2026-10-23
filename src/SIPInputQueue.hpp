@@ -14,9 +14,8 @@ namespace subtickinputs {
 
     inline geode::Result<void> setInputQueueWithRatios(
         std::vector<PlayerButtonCommandWithRatio> inputQueue, float dt)
-        GEODE_EVENT_EXPORT(&setInputQueueWithRatios,
-            (std::vector<PlayerButtonCommandWithRatio> inputQueue, float dt));
+        GEODE_EVENT_EXPORT(&setInputQueueWithRatios, (inputQueue, dt));
 
     inline geode::Result<std::vector<PlayerButtonCommandWithRatio>> getInputQueueWithRatios(
-        float dt) GEODE_EVENT_EXPORT(&getInputQueueWithRatios, (float dt));
+        float dt) GEODE_EVENT_EXPORT(&getInputQueueWithRatios, (dt));
 } // namespace subtickinputs
