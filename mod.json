@@ -3,11 +3,11 @@
   "gd": {
     "win": "2.2081"
   },
-  "version": "v1.0.3",
+  "version": "v1.0.4",
   "id": "ai.predictivebuffer",
   "name": "Predictive Input Buffer",
   "developer": "lilWC",
-  "description": "Original-timing predictive buffer, F9 presets through 24 ticks for cube and Wave, with optional Superb Input Precision beta.6 queue integration for Geometry Dash 2.2081.",
+  "description": "Conservative predictive input buffer for Geometry Dash 2.2081: F9 presets through 24 ticks, safer Robot/Ball/Cube/UFO timing, Wave trajectory buffering, and optional Superb Input Precision beta.6 queue integration.",
   "dependencies": {
     "chizz.superb-input-precision": {
       "version": ">=v1.0.0-beta.6",
