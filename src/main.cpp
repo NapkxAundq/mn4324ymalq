@@ -219,8 +219,12 @@ public:
 
         float dt = getValidDt();
         int survived = 0;
+        // Robot and Ball need a full forward simulation too: landing briefly is not
+        // proof that a delayed input survives the upcoming section.
         bool isContinuousMode = realP1->m_isDart || realP1->m_isBird || realP1->m_isSwing ||
-                                (isDual && realP2 && (realP2->m_isDart || realP2->m_isBird || realP2->m_isSwing));
+                                realP1->m_isRobot || realP1->m_isBall ||
+                                (isDual && realP2 && (realP2->m_isDart || realP2->m_isBird || realP2->m_isSwing ||
+                                                      realP2->m_isRobot || realP2->m_isBall));
         int airborneTicks = 0;
         int safeLandedTicks = 0;
 
@@ -415,6 +419,11 @@ public:
         bool isMiniWave = (p1->m_isDart && p1->m_vehicleSize < 1.0f) ||
                           (isDual && p2 && p2->m_isDart && p2->m_vehicleSize < 1.0f);
         bool isCube = p1->isInNormalMode() && (!isDual || !p2 || p2->isInNormalMode());
+        bool isRobot = p1->m_isRobot || (isDual && p2 && p2->m_isRobot);
+        bool isBall = p1->m_isBall || (isDual && p2 && p2->m_isBall);
+        bool isUfo = p1->m_isBird || (isDual && p2 && p2->m_isBird);
+        // For these modes, extra survival time is not enough. Only block the real
+        // input when a candidate delay survives the entire prediction horizon.
 
         // 3. STREAK-BASED WAVE SPAM GUARD:
         // Only bypasses if you perform 3+ rapid inputs in a row (< 8 ticks apart).
@@ -484,7 +493,7 @@ public:
                     bestTicks = ticks;
                     break;
                 }
-                if (!isCube && ticks > bestTicks + 12) {
+                if (!(isCube || isRobot || isBall || isUfo) && ticks > bestTicks + 12) {
                     bestDelay = delay;
                     bestTicks = ticks;
                 }
@@ -576,7 +585,7 @@ $on_mod(Loaded) {
     freopen_s(&f, "CONOUT$", "w", stdout);
     SetConsoleTitleA("Geode Predictive Input Buffer - Live Console");
     printf("============================================================\n");
-    printf(" [InputBuffer] v1.0.3 LOADED (Original timing + cube forecast + optional SIP)\n");
+    printf(" [InputBuffer] v1.0.4 LOADED (Conservative Robot/Ball prediction + cube/UFO checks)\n");
     printf(" [InputBuffer] Starting Mode: STAGE 1 (2 All / 2 Wave)\n");
     printf(" [InputBuffer] Press F9 in-level to cycle: 2/2 -> 4/4 -> 8/8 -> 16/16 -> 24/24 -> OFF\n");
     printf("============================================================\n");
