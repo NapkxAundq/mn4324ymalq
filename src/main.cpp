@@ -170,6 +170,7 @@ private:
 
 public:
     void init() {
+        quit();
         PlayLayer* pl = PlayLayer::get();
         if (!pl) return;
 
@@ -439,7 +440,7 @@ public:
         // it is injected at its preserved ratio in the next queue-processing phase.
         if (pl->m_player1->m_isShip ||
             (pl->m_gameState.m_isDualMode && pl->m_player2 && pl->m_player2->m_isShip)) {
-            clearPendingInput();
+            flushPendingInput(pl);
             if (m_gameHolding != m_physicalHolding) m_SimFireButton(pl, m_physicalHolding);
             return;
         }
@@ -479,8 +480,7 @@ public:
         m_physicalHolding = push;
 
         if (hasInputModConflict()) {
-            m_waitTicks = -1;
-            m_queuedOpposite = false;
+            flushPendingInput(pl);
             m_gameHolding = push;
             if (!m_warnedInputModConflict) {
                 printf("[InputBuffer] WARNING: CBF and SIP are both active. Disable one; buffer bypassed.\n");
@@ -505,8 +505,7 @@ public:
 
         // 1. NEVER touch Ship mode (or Dual with Ship)
         if (p1->m_isShip || (isDual && p2 && p2->m_isShip)) {
-            m_waitTicks = -1;
-            m_queuedOpposite = false;
+            flushPendingInput(pl);
             m_gameHolding = push;
             return true;
         }
@@ -607,11 +606,22 @@ public:
         for (int delay = 1; delay <= maxDelayFrames; delay++) {
             int ticks = getSurvivalTicks(pl, p1, p2, isDual, delay, push, targetHorizon);
 
-            // Never report a "save" just because a delayed path dies later than the original.
-            // The candidate must survive the full horizon. Wave also keeps a stricter gain
-            // threshold to avoid treating a flat-corridor timing shift as a genuine save.
-            if (ticks >= targetHorizon &&
-                (!isWave || (ticks - ticksFrame0) >= (delay * 2) + 10)) {
+            if (isWave) {
+                // Preserve LilWC's wave-specific trajectory heuristic: a delayed turn may
+                // clear the immediate corner/spike even when another hazard lies later.
+                int minClearedGain = (delay * 2) + 10;
+                if (ticks >= targetHorizon && (ticks - ticksFrame0) >= (delay * 2) + 6) {
+                    bestDelay = delay;
+                    bestTicks = ticks;
+                    break;
+                }
+                if (ticks >= ticksFrame0 + minClearedGain && ticks > bestTicks + 2) {
+                    bestDelay = delay;
+                    bestTicks = ticks;
+                    if (ticks >= targetHorizon) break;
+                }
+            } else if (ticks >= targetHorizon) {
+                // For cube/robot/ball/UFO and other modes, only count a complete safe horizon.
                 bestDelay = delay;
                 bestTicks = ticks;
                 break;
@@ -661,7 +671,7 @@ public:
         }
 
         if (player->m_isShip || (pl->m_gameState.m_isDualMode && pl->m_player2 && pl->m_player2->m_isShip)) {
-            clearPendingInput();
+            flushPendingInput(pl);
             if (m_gameHolding != m_physicalHolding) {
                 m_SimFireButton(pl, m_physicalHolding);
             }
@@ -709,7 +719,7 @@ $on_mod(Loaded) {
     freopen_s(&f, "CONOUT$", "w", stdout);
     SetConsoleTitleA("Geode Predictive Input Buffer - Live Console");
     printf("============================================================\n");
-    printf(" [InputBuffer] v1.0.5 LOADED (Full-horizon safety + SIP ratio preservation)\n");
+    printf(" [InputBuffer] v1.0.5 LOADED (Full-horizon safety + SIP ratio preservation + trigger guards)\n");
     printf(" [InputBuffer] Starting Mode: STAGE 1 (2 All / 2 Wave)\n");
     printf(" [InputBuffer] Press F9 in-level to cycle: 2/2 -> 4/4 -> 8/8 -> 16/16 -> 24/24 -> OFF\n");
     printf("============================================================\n");
@@ -888,6 +898,11 @@ class $modify(BufBaseGameLayer, GJBaseGameLayer) {
                     obj->m_objectType == GameObjectType::CollisionObject ||
                     obj->m_objectType == GameObjectType::Slope) {
                     extra.push_back(obj);
+                } else if (typeinfo_cast<EffectGameObject*>(obj) || typeinfo_cast<RingObject*>(obj)) {
+                    // This simulation deliberately cannot execute portals, pads, orbs and
+                    // other trigger side effects. If one enters this candidate set, do not
+                    // claim that the simplified path is safe.
+                    s_sim.markSimulationUnsupported(player);
                 }
             }
             GJBaseGameLayer::collisionCheckObjects(player, &extra, extra.size(), dt);
