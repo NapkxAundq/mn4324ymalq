@@ -45,6 +45,7 @@ private:
     bool m_simulationDead = false;
     bool m_simulationUnsupported = false;
     bool m_warnedInputModConflict = false;
+    bool m_warnedBudgetCutoff = false;
 
     // Tracks actual physical mouse state vs what PlayLayer currently has active
     bool m_physicalHolding = false;
@@ -108,6 +109,8 @@ private:
         sim->m_width = real->m_width;
         sim->m_height = real->m_height;
         sim->m_gravityMod = real->m_gravityMod;
+        sim->m_gravity = real->m_gravity;
+        sim->m_speedMultiplier = real->m_speedMultiplier;
         sim->m_isOnGround = real->m_isOnGround;
         sim->m_isUpsideDown = real->m_isUpsideDown;
         sim->m_vehicleSize = real->m_vehicleSize;
@@ -177,6 +180,7 @@ public:
         m_ticksSinceLastInput = 999;
         m_rapidInputStreak = 0;
         m_warnedInputModConflict = false;
+        m_warnedBudgetCutoff = false;
         m_simulationUnsupported = false;
     }
 
@@ -652,8 +656,11 @@ public:
 
         for (int delay = 1; delay <= maxDelayFrames; delay++) {
             if (simulationBudgetExceeded()) {
-                printf("[InputBuffer] Forecast budget %.1f ms reached; passing through unless a safe delay was already found.\n",
-                    SIMULATION_BUDGET_MS);
+                if (!m_warnedBudgetCutoff) {
+                    printf("[InputBuffer] Forecast budget %.1f ms reached; stopping the delay scan for this level.\n",
+                        SIMULATION_BUDGET_MS);
+                    m_warnedBudgetCutoff = true;
+                }
                 break;
             }
             int ticks = getSurvivalTicks(pl, p1, p2, isDual, delay, push, targetHorizon);
@@ -771,7 +778,7 @@ $on_mod(Loaded) {
     freopen_s(&f, "CONOUT$", "w", stdout);
     SetConsoleTitleA("Geode Predictive Input Buffer - Live Console");
     printf("============================================================\n");
-    printf(" [InputBuffer] v1.0.7 LOADED (Audit + bounded prediction + ordered SIP subticks)\n");
+    printf(" [InputBuffer] v1.0.7 LOADED (Full audit + state sync + bounded prediction)\n");
     printf(" [InputBuffer] Starting Mode: STAGE 1 (2 All / 2 Wave)\n");
     printf(" [InputBuffer] Press F9 in-level to cycle: 2/2 -> 4/4 -> 8/8 -> 16/16 -> 24/24 -> OFF\n");
     printf("============================================================\n");
@@ -957,10 +964,9 @@ class $modify(BufBaseGameLayer, GJBaseGameLayer) {
             } else {
                 extra.clear();
             }
-            extra.reserve(std::min(objectsCount, static_cast<int>(vec->size())));
-
-            // Guard against a stale objectsCount; never index outside the source list.
-            int count = std::min(objectsCount, static_cast<int>(vec->size()));
+            // Guard against a stale or negative objectsCount before reserve/indexing.
+            int count = std::max(0, std::min(objectsCount, static_cast<int>(vec->size())));
+            extra.reserve(static_cast<size_t>(count));
             for (int i = 0; i < count; i++) {
                 GameObject* obj = (*vec)[i];
                 if (!obj) continue;
