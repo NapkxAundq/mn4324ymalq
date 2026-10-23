@@ -28,7 +28,7 @@ constexpr int SPAM_STREAK_REQUIRED = 3;
 
 // Cap the time spent comparing candidate delays. The budget is checked between simulations,
 // never mid-simulation; hitting it fails open (the live input passes through).
-constexpr double SIMULATION_BUDGET_MS = 24.0;
+constexpr double SIMULATION_BUDGET_MS = 40.0;
 
 // ============================================================================
 
