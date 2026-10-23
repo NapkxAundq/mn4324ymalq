@@ -9,7 +9,6 @@
 #include <Windows.h>
 #include <cstdio>
 #include <algorithm>
-#include <chrono>
 #include <vector>
 #include <utility>
 #include "SIPInputQueue.hpp"
@@ -26,11 +25,6 @@ using namespace geode::prelude;
 constexpr int SPAM_INTERVAL_TICKS = 8;
 constexpr int SPAM_STREAK_REQUIRED = 3;
 // Short input pairs are precision corrections. Never let a pending prediction stretch them.
-constexpr int MICROCLICK_MAX_TICKS = 4;
-
-// Cap the time spent comparing candidate delays. The budget is checked between simulations,
-// never mid-simulation; hitting it fails open (the live input passes through).
-constexpr double SIMULATION_BUDGET_MS = 40.0;
 
 // ============================================================================
 
@@ -45,10 +39,7 @@ private:
     bool m_simulating = false;
     bool m_firingBuffered = false;
     bool m_simulationDead = false;
-    bool m_simulationUnsupported = false;
     bool m_warnedInputModConflict = false;
-    bool m_warnedBudgetCutoff = false;
-    int m_predictionUnavailableWarnings = 0; // bounded per-level diagnostics so no-op regressions are visible
 
     // Tracks actual physical mouse state vs what PlayLayer currently has active
     bool m_physicalHolding = false;
@@ -104,71 +95,15 @@ private:
     void syncSimPlayer(PlayerObject* sim, PlayerObject* real) {
         sim->setVisible(false);
         sim->copyAttributes(real);
-        sim->setPosition(real->getPosition());
-        sim->setRotation(real->getRotation());
-        sim->m_yVelocity = real->m_yVelocity;
-        sim->m_jumpBuffered = real->m_jumpBuffered;
-        sim->m_isOnGround2 = real->m_isOnGround2;
-        sim->m_platformerXVelocity = real->m_platformerXVelocity;
         sim->setScale(real->getScale());
         sim->setContentSize(real->getContentSize());
         sim->m_width = real->m_width;
         sim->m_height = real->m_height;
         sim->m_gravityMod = real->m_gravityMod;
-        sim->m_gravity = real->m_gravity;
-        sim->m_speedMultiplier = real->m_speedMultiplier;
         sim->m_isOnGround = real->m_isOnGround;
         sim->m_isUpsideDown = real->m_isUpsideDown;
         sim->m_vehicleSize = real->m_vehicleSize;
         sim->m_playerSpeed = real->m_playerSpeed;
-    }
-
-    void clearPendingInput() {
-        m_waitTicks = -1;
-        m_queuedOpposite = false;
-        m_hasBufferedSIPInput = false;
-        m_hasQueuedOppositeSIPInput = false;
-        m_sipReadyAction = false;
-        m_sipInputsAfterOpposite.clear();
-    }
-
-    void appendSIPAction(PlayLayer* pl, SIPInputQueue& output, SIPInput source, bool push,
-                         std::vector<std::pair<double, bool>>* fallbackActions = nullptr) {
-        source.input.m_button = PlayerButton::Jump;
-        source.input.m_isPush = push;
-        source.input.m_isPlayer2 = false;
-        output.push_back(source);
-        if (fallbackActions) fallbackActions->push_back({source.ratio, push});
-
-        if (pl && pl->m_gameState.m_isDualMode && (!pl->m_level || !pl->m_level->m_twoPlayerMode)) {
-            source.input.m_isPlayer2 = true;
-            output.push_back(source);
-        }
-        m_gameHolding = push;
-    }
-
-    void flushPendingInput(PlayLayer* pl) {
-        if (!pl) {
-            clearPendingInput();
-            return;
-        }
-
-        // This path is reserved for emergency passthroughs (e.g. an input-mod conflict or
-        // a mode transition). Never drop a captured press/release pair in that case.
-        if (m_waitTicks >= 0) {
-            m_SimFireButton(pl, m_bufferedPush);
-            if (m_queuedOpposite) m_SimFireButton(pl, !m_bufferedPush);
-        } else if (m_waitTicks == -2 || m_sipReadyAction) {
-            m_SimFireButton(pl, !m_bufferedPush);
-        }
-        // Fail-open fallback: replay events deferred behind the queued opposite before
-        // allowing a fresh raw queue to reach the game.
-        for (auto const& item : m_sipInputsAfterOpposite) {
-            if (static_cast<int>(item.input.m_button) == 1) {
-                m_SimFireButton(pl, item.input.m_isPush);
-            }
-        }
-        clearPendingInput();
     }
 
     float getValidDt() const {
@@ -194,9 +129,6 @@ public:
         m_ticksSinceLastInput = 999;
         m_rapidInputStreak = 0;
         m_warnedInputModConflict = false;
-        m_warnedBudgetCutoff = false;
-        m_predictionUnavailableWarnings = 0;
-        m_simulationUnsupported = false;
     }
 
     void quit() {
@@ -215,7 +147,6 @@ public:
         m_firingBuffered = false;
         clearPendingInput();
         m_rapidInputStreak = 0;
-        m_simulationUnsupported = false;
     }
 
     // F9 cycles through 2, 4, 8, 16, 24 ticks, then OFF.
@@ -252,11 +183,6 @@ public:
     bool isSimulatedPlayer(PlayerObject* player) const {
         return player && (player == m_simPlayer1 || player == m_simPlayer2);
     }
-    void markSimulationUnsupported(PlayerObject* player = nullptr) {
-        if (m_simulating && (!player || isSimulatedPlayer(player))) {
-            m_simulationUnsupported = true;
-        }
-    }
 
     bool checkSimulationDeath(PlayerObject* player) {
         if (m_simulating && (player == m_simPlayer1 || player == m_simPlayer2)) {
@@ -280,24 +206,28 @@ public:
     }
 
     int getSurvivalTicks(PlayLayer* pl, PlayerObject* realP1, PlayerObject* realP2, bool isDual, int delayFrames, bool actionPush, int maxTicks) {
-        // Missing simulation data must never be interpreted as a safe trajectory.
-        if (!pl || !m_simPlayer1 || !realP1 || (isDual && (!m_simPlayer2 || !realP2))) return -1;
+        if (!pl || !m_simPlayer1 || !realP1) return maxTicks;
 
         m_simulating = true;
         m_simulationDead = false;
-        m_simulationUnsupported = false;
 
         syncSimPlayer(m_simPlayer1, realP1);
-        if (isDual) syncSimPlayer(m_simPlayer2, realP2);
+        if (isDual && m_simPlayer2 && realP2) {
+            syncSimPlayer(m_simPlayer2, realP2);
+        }
 
-        // Recreate the button state that precedes this hypothetical transition.
+        // Before delayFrames, maintain the pre-input button state
         if (delayFrames > 0) {
             if (!actionPush) {
                 m_simPlayer1->pushButton(PlayerButton::Jump);
-                if (isDual) m_simPlayer2->pushButton(PlayerButton::Jump);
+                if (isDual && m_simPlayer2) {
+                    m_simPlayer2->pushButton(PlayerButton::Jump);
+                }
             } else {
                 m_simPlayer1->releaseButton(PlayerButton::Jump);
-                if (isDual) m_simPlayer2->releaseButton(PlayerButton::Jump);
+                if (isDual && m_simPlayer2) {
+                    m_simPlayer2->releaseButton(PlayerButton::Jump);
+                }
             }
         }
 
@@ -308,35 +238,37 @@ public:
         int airborneTicks = 0;
         int safeLandedTicks = 0;
 
-        // Match LilWC's established logic: a safe landing counts as surviving this
-        // prediction horizon; continuous modes (Wave/UFO/Swing) keep simulating.
         for (int i = 0; i < delayFrames + maxTicks; i++) {
             if (i == delayFrames) {
                 if (actionPush) {
                     m_simPlayer1->pushButton(PlayerButton::Jump);
-                    if (isDual) m_simPlayer2->pushButton(PlayerButton::Jump);
+                    if (isDual && m_simPlayer2) {
+                        m_simPlayer2->pushButton(PlayerButton::Jump);
+                    }
                 } else {
                     m_simPlayer1->releaseButton(PlayerButton::Jump);
-                    if (isDual) m_simPlayer2->releaseButton(PlayerButton::Jump);
+                    if (isDual && m_simPlayer2) {
+                        m_simPlayer2->releaseButton(PlayerButton::Jump);
+                    }
                 }
             }
 
             m_simPlayer1->update(dt);
             m_simPlayer1->updateRotation(dt);
-            if (isDual) {
+            if (isDual && m_simPlayer2) {
                 m_simPlayer2->update(dt);
                 m_simPlayer2->updateRotation(dt);
             }
-            if (m_simulationDead || m_simulationUnsupported) break;
+            if (m_simulationDead) break;
 
             resetCollisionLog(m_simPlayer1);
             pl->checkCollisions(m_simPlayer1, dt, false);
-            if (m_simulationDead || m_simulationUnsupported) break;
+            if (m_simulationDead) break;
 
-            if (isDual) {
+            if (isDual && m_simPlayer2 && realP2) {
                 resetCollisionLog(m_simPlayer2);
                 pl->checkCollisions(m_simPlayer2, dt, false);
-                if (m_simulationDead || m_simulationUnsupported) break;
+                if (m_simulationDead) break;
             }
 
             if (i >= delayFrames) {
@@ -359,7 +291,7 @@ public:
         }
 
         m_simulating = false;
-        return m_simulationUnsupported ? -1 : survived;
+        return survived;
     }
 
     bool isSIPEnabled() const {
@@ -619,16 +551,7 @@ public:
             return true;
         }
 
-        bool isWave = p1->m_isDart || (isDual && p2 && p2->m_isDart);
-        bool isMiniWave = (p1->m_isDart && p1->m_vehicleSize < 1.0f) ||
-                          (isDual && p2 && p2->m_isDart && p2->m_vehicleSize < 1.0f);
-        bool isCube = p1->isInNormalMode() && (!isDual || !p2 || p2->isInNormalMode());
-        bool releaseAffectsPhysics = p1->m_isDart || p1->m_isRobot ||
-                                     (isDual && p2 && (p2->m_isDart || p2->m_isRobot));
-
-        // 2. A short opposite event ends the pending press/release pair in every mode.
-        // Otherwise even a Cube tap can remain logically held during the selected delay.
-        // SIP needs one countdown tick to stage the event in its next queue phase.
+        // Original LilWC pending-input handling; SIP records the original opposite event.
         if (m_waitTicks >= 0) {
             if (push != m_bufferedPush) {
                 m_queuedOpposite = true;
@@ -636,30 +559,6 @@ public:
                     m_queuedOppositeSIPInput = *sipInput;
                     m_hasQueuedOppositeSIPInput = true;
                 }
-
-                if (m_ticksSinceLastInput <= MICROCLICK_MAX_TICKS) {
-                    m_waitTicks = sipOutput ? 1 : 0;
-                    if (isWave) {
-                        m_rapidInputStreak = std::max(m_rapidInputStreak, SPAM_STREAK_REQUIRED - 1);
-                    }
-                }
-            } else if (m_queuedOpposite) {
-                // Do not erase a pending release when another press arrives before the
-                // delayed press has been emitted. That sequence is press -> release -> press,
-                // not a duplicate press; collapsing it leaves Wave stuck or swallows a tap.
-                if (sipInput && sipOutput) {
-                    // SIP events must be replayed after the preserved opposite transition.
-                    m_sipInputsAfterOpposite.push_back(*sipInput);
-                    m_ticksSinceLastInput = 0;
-                    return false;
-                }
-
-                // Native input has no ratio queue. Flush the captured pair in order, then
-                // let this fresh input pass through normally so the latest physical state wins.
-                flushPendingInput(pl);
-                m_gameHolding = push;
-                m_ticksSinceLastInput = 0;
-                return true;
             } else {
                 m_queuedOpposite = false;
                 m_hasQueuedOppositeSIPInput = false;
@@ -700,25 +599,18 @@ public:
             m_sipReadyAction = false;
         }
 
-        // Releases that change physics (Wave and Robot) are latency-sensitive. When a
-        // short press has already reached the game, never re-buffer its release in any stage.
-        if (!push && releaseAffectsPhysics && m_ticksSinceLastInput <= MICROCLICK_MAX_TICKS) {
-            m_gameHolding = false;
-            if (isWave) {
-                m_rapidInputStreak = std::max(m_rapidInputStreak, SPAM_STREAK_REQUIRED - 1);
-            }
-            m_ticksSinceLastInput = 0;
-            return true;
-        }
+        bool isWave = p1->m_isDart || (isDual && p2 && p2->m_isDart);
+        bool isMiniWave = (p1->m_isDart && p1->m_vehicleSize < 1.0f) ||
+                          (isDual && p2 && p2->m_isDart && p2->m_vehicleSize < 1.0f);
 
+        // 3. STREAK-BASED WAVE SPAM GUARD:
         // 3. STREAK-BASED WAVE SPAM GUARD:
         // Only bypasses if you perform 3+ rapid inputs in a row (< 8 ticks apart).
         // Single micro-clicks and normal Wave turns around spikes/sawblades stay 100% active!
         if (m_ticksSinceLastInput < SPAM_INTERVAL_TICKS) {
             m_rapidInputStreak++;
         } else {
-            // Count this event as the first input in a fresh burst.
-            m_rapidInputStreak = 1;
+            m_rapidInputStreak = 0;
         }
         m_ticksSinceLastInput = 0;
 
@@ -740,130 +632,40 @@ public:
         // so it sees spikes and sawblades 1-3 blocks ahead along the diagonal path!
         int targetHorizon = isMiniWave ? 50 : (isWave ? 65 : 160);
         int maxDelayFrames = isWave ? m_maxTicksWave : m_maxTicksNormal;
-        // High-delay stages can move a click far enough to turn a merely improved path
-        // into a death. In stages 16/24, only accept a candidate that survives the full
-        // prediction horizon; otherwise fail open and send the original input immediately.
-        bool conservativeHighDelay = maxDelayFrames >= 16;
-
-        // No candidate delay can be selected with a zero/negative limit.
-        if (maxDelayFrames <= 0) {
-            m_gameHolding = push;
-            return true;
-        }
-
-        // Never hitch the game indefinitely when every candidate requires a full simulation.
-        // Start just before the first forecast and only stop between candidate trajectories.
-        const auto simulationStart = std::chrono::steady_clock::now();
-        // Keep prediction on the gameplay thread tightly bounded: a long simulation can
-        // itself make a precision Wave click arrive late. High stages get broader sampling
-        // order, not a longer stall.
-        const double inputBudgetMs = SIMULATION_BUDGET_MS;
-        auto simulationBudgetExceeded = [&]() {
-            return std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - simulationStart).count() >= inputBudgetMs;
-        };
-
         // 4. Check Frame 0 (immediate input) across the full trajectory horizon
         int ticksFrame0 = getSurvivalTicks(pl, p1, p2, isDual, 0, push, targetHorizon);
         if (ticksFrame0 >= targetHorizon) {
             m_gameHolding = push;
             return true;
         }
-        // If the path touches unsupported trigger logic, do not let a guessed trajectory
-        // delay an input. Pass through the player's actual command instead.
-        if (ticksFrame0 < 0) {
-            if (m_predictionUnavailableWarnings < 8) {
-                printf("[InputBuffer] Prediction unavailable for this input; passing through instead of delaying an unverified click. Check the current level's collision/trigger area.\n");
-                ++m_predictionUnavailableWarnings;
-            }
-            m_gameHolding = push;
-            return true;
-        }
 
-        // 5. Frame 0 hits a spike, sawblade, or slope within the horizon!
-        // Scan +1..maxDelayFrames for the earliest delay that genuinely clears the obstacle.
+        // 5. Frame 0 hits an obstacle within the prediction horizon.
+        // Scan +1..maxDelayFrames for the earliest delay that improves survival.
         int bestDelay = 0;
         int bestTicks = ticksFrame0;
 
-        std::vector<int> delayCandidates;
-        delayCandidates.reserve(static_cast<size_t>(maxDelayFrames));
-        auto addDelayCandidate = [&](int delay) {
-            if (delay < 1 || delay > maxDelayFrames) return;
-            if (std::find(delayCandidates.begin(), delayCandidates.end(), delay) == delayCandidates.end()) {
-                delayCandidates.push_back(delay);
-            }
-        };
-        // At short stages, test all fine timings first. At 16/24 ticks, reserve the
-        // guaranteed first four simulations for two precise early timings and two points
-        // across the wider window, so the bounded scan does not miss all useful later delays.
-        if (conservativeHighDelay) {
-            addDelayCandidate(1);
-            addDelayCandidate(2);
-            addDelayCandidate(maxDelayFrames / 4);
-            addDelayCandidate(maxDelayFrames / 2);
-        } else {
-            for (int delay = 1; delay <= std::min(4, maxDelayFrames); ++delay) addDelayCandidate(delay);
-        }
-        addDelayCandidate((maxDelayFrames + 3) / 4);
-        addDelayCandidate((maxDelayFrames + 2) / 3);
-        addDelayCandidate((maxDelayFrames + 1) / 2);
-        addDelayCandidate((maxDelayFrames * 2 + 2) / 3);
-        addDelayCandidate((maxDelayFrames * 3 + 3) / 4);
-        addDelayCandidate(maxDelayFrames);
-        for (int delay = 1; delay <= maxDelayFrames; ++delay) addDelayCandidate(delay);
-
-        int candidatesTested = 0;
-        for (int delay : delayCandidates) {
-            // Always evaluate the first four real delay candidates, even on a slower PC;
-            // a strict time-only cutoff here previously made the buffer pass every input.
-            if (candidatesTested >= 4 && simulationBudgetExceeded()) {
-                if (!m_warnedBudgetCutoff) {
-                    printf("[InputBuffer] Forecast budget %.1f ms reached; stopping the delay scan for this level.\n",
-                        inputBudgetMs);
-                    m_warnedBudgetCutoff = true;
-                }
-                break;
-            }
+        for (int delay = 1; delay <= maxDelayFrames; delay++) {
             int ticks = getSurvivalTicks(pl, p1, p2, isDual, delay, push, targetHorizon);
-            candidatesTested++;
-
-            if (ticks < 0) {
-                // An invalid simulation must not erase a safer candidate already found.
-                continue;
-            }
 
             if (isWave) {
-                // Preserve LilWC's threshold and partial-improvement fallback. The fallback
-                // is important on levels where every candidate encounters a later hazard.
                 int minClearedGain = (delay * 2) + 10;
-                // In high-delay stages, full-horizon survival is the safety criterion.
-                // The old delay-proportional gain threshold could reject even a fully safe
-                // timing (especially at 24 ticks), making those stages feel no better.
-                if (ticks >= targetHorizon &&
-                    (conservativeHighDelay || (ticks - ticksFrame0) >= (delay * 2) + 6)) {
-                    if (bestDelay == 0 || delay < bestDelay) {
-                        bestDelay = delay;
-                        bestTicks = ticks;
-                    }
-                    if (!conservativeHighDelay || bestDelay == 1) break;
+                if (ticks >= targetHorizon && (ticks - ticksFrame0) >= (delay * 2) + 6) {
+                    bestDelay = delay;
+                    bestTicks = ticks;
+                    break;
                 }
-                if (!conservativeHighDelay &&
-                    ticks >= ticksFrame0 + minClearedGain && ticks > bestTicks + 2) {
+                if (ticks >= ticksFrame0 + minClearedGain && ticks > bestTicks + 2) {
                     bestDelay = delay;
                     bestTicks = ticks;
                     if (ticks >= targetHorizon) break;
                 }
             } else {
                 if (ticks >= targetHorizon) {
-                    if (bestDelay == 0 || delay < bestDelay) {
-                        bestDelay = delay;
-                        bestTicks = ticks;
-                    }
-                    if (!conservativeHighDelay || bestDelay == 1) break;
+                    bestDelay = delay;
+                    bestTicks = ticks;
+                    break;
                 }
-                // Do not require a full horizon for every mode: a meaningful survival gain
-                // is a valid save, just as in LilWC's original implementation.
-                if (!conservativeHighDelay && ticks > bestTicks + 12) {
+                if (ticks > bestTicks + 12) {
                     bestDelay = delay;
                     bestTicks = ticks;
                 }
@@ -967,7 +769,7 @@ $on_mod(Loaded) {
     freopen_s(&f, "CONOUT$", "w", stdout);
     SetConsoleTitleA("Geode Predictive Input Buffer - Live Console");
     printf("============================================================\n");
-    printf(" [InputBuffer] v1.1.3 LOADED (microclick-safe queue; bounded distributed prediction)\n");
+    printf(" [InputBuffer] v4.7 BASE RESTORED (LilWC thresholds; F9 24 ticks; SIP/CBF compatibility)\n");
     printf(" [InputBuffer] Starting Mode: STAGE 1 (2 All / 2 Wave)\n");
     printf(" [InputBuffer] Press F9 in-level to cycle: 2/2 -> 4/4 -> 8/8 -> 16/16 -> 24/24 -> OFF\n");
     printf("============================================================\n");
@@ -1130,29 +932,10 @@ class $modify(BufBaseGameLayer, GJBaseGameLayer) {
 
     void collisionCheckObjects(PlayerObject* player, gd::vector<GameObject*>* vec, int objectsCount, float dt) {
         if (s_sim.isSimulating()) {
-            if (!vec) {
-                s_sim.markSimulationUnsupported(player);
-                return;
-            }
-
-            // Reuse the filtered collision list for every simulated tick. A local list
-            // is used only for unexpected re-entrant collision calls.
-            static gd::vector<GameObject*> scratch;
-            static bool scratchBusy = false;
-            gd::vector<GameObject*> local;
-            bool useScratch = !scratchBusy;
-            gd::vector<GameObject*>& extra = useScratch ? scratch : local;
-            if (useScratch) {
-                scratchBusy = true;
-                extra.clear();
-            } else {
-                extra.clear();
-            }
-            // Guard against a stale or negative objectsCount before reserve/indexing.
-            int count = std::max(0, std::min(objectsCount, static_cast<int>(vec->size())));
-            extra.reserve(static_cast<size_t>(count));
-            for (int i = 0; i < count; i++) {
-                GameObject* obj = (*vec)[i];
+            gd::vector<GameObject*> extra;
+            extra.reserve(objectsCount);
+            for (int i = 0; i < objectsCount; i++) {
+                GameObject* obj = vec->at(i);
                 if (!obj) continue;
                 if (obj->m_objectType == GameObjectType::Solid ||
                     obj->m_objectType == GameObjectType::Hazard ||
@@ -1160,10 +943,9 @@ class $modify(BufBaseGameLayer, GJBaseGameLayer) {
                     obj->m_objectType == GameObjectType::CollisionObject ||
                     obj->m_objectType == GameObjectType::Slope) {
                     extra.push_back(obj);
-                } // Trigger/ring side effects are suppressed by hooks above, as in LilWC's original.
+                }
             }
-            GJBaseGameLayer::collisionCheckObjects(player, &extra, static_cast<int>(extra.size()), dt);
-            if (useScratch) scratchBusy = false;
+            GJBaseGameLayer::collisionCheckObjects(player, &extra, extra.size(), dt);
             return;
         }
         GJBaseGameLayer::collisionCheckObjects(player, vec, objectsCount, dt);
