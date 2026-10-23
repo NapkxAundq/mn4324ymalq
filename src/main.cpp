@@ -513,10 +513,10 @@ public:
     void onSIPPhysicsTick() {
         if (!usesSIPTickClock()) return;
         auto* pl = PlayLayer::get();
-        if (!pl || !pl->m_player1 ||
-            (!m_enabled && m_waitTicks == -1 && !m_sipReadyAction)) return;
+        if (!pl || !pl->m_player1) return;
 
         if (m_ticksSinceLastInput < 999) m_ticksSinceLastInput++;
+        if (!m_enabled && m_waitTicks == -1 && !m_sipReadyAction) return;
 
         // SIP processes the queue before processCommands. Mark an expiring action ready here;
         // it is injected at its preserved ratio in the next queue-processing phase.
@@ -781,11 +781,20 @@ public:
     void advanceBufferTick(PlayerObject* player) {
         PlayLayer* pl = PlayLayer::get();
         if (!pl || !player || player != pl->m_player1) return;
-        if (!m_enabled && m_waitTicks == -1) return;
 
         if (m_ticksSinceLastInput < 999) {
             m_ticksSinceLastInput++;
         }
+
+        // If SIP and CBF become active together after a buffer started, immediately
+        // abandon the prediction and reconcile the button state before returning to raw input.
+        if (hasInputModConflict()) {
+            flushPendingInput(pl);
+            if (m_gameHolding != m_physicalHolding) m_SimFireButton(pl, m_physicalHolding);
+            return;
+        }
+
+        if (!m_enabled && m_waitTicks == -1) return;
 
         bool twoPlayerControl = pl->m_level && pl->m_level->m_twoPlayerMode;
         bool sharedDual = pl->m_gameState.m_isDualMode && pl->m_player2 && !twoPlayerControl;
