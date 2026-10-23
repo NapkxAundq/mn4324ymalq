@@ -754,9 +754,10 @@ public:
         // Never hitch the game indefinitely when every candidate requires a full simulation.
         // Start just before the first forecast and only stop between candidate trajectories.
         const auto simulationStart = std::chrono::steady_clock::now();
-        // Wave gets a slightly larger but still bounded window at 16/24 ticks because
-        // its 65-tick horizon otherwise tends to test only the first few input timings.
-        const double inputBudgetMs = (isWave && conservativeHighDelay) ? 70.0 : SIMULATION_BUDGET_MS;
+        // Keep prediction on the gameplay thread tightly bounded: a long simulation can
+        // itself make a precision Wave click arrive late. High stages get broader sampling
+        // order, not a longer stall.
+        const double inputBudgetMs = SIMULATION_BUDGET_MS;
         auto simulationBudgetExceeded = [&]() {
             return std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - simulationStart).count() >= inputBudgetMs;
@@ -792,11 +793,17 @@ public:
                 delayCandidates.push_back(delay);
             }
         };
-        // Always start with fine corrections at every stage, then add a distributed
-        // sample of the available window before filling in the remaining delays.
-        // This lets stage 8 explore its upper half and stage 16/24 sample the full range
-        // when the per-input budget permits, without losing the guaranteed first four.
-        for (int delay = 1; delay <= std::min(4, maxDelayFrames); ++delay) addDelayCandidate(delay);
+        // At short stages, test all fine timings first. At 16/24 ticks, reserve the
+        // guaranteed first four simulations for two precise early timings and two points
+        // across the wider window, so the bounded scan does not miss all useful later delays.
+        if (conservativeHighDelay) {
+            addDelayCandidate(1);
+            addDelayCandidate(2);
+            addDelayCandidate(maxDelayFrames / 4);
+            addDelayCandidate(maxDelayFrames / 2);
+        } else {
+            for (int delay = 1; delay <= std::min(4, maxDelayFrames); ++delay) addDelayCandidate(delay);
+        }
         addDelayCandidate((maxDelayFrames + 3) / 4);
         addDelayCandidate((maxDelayFrames + 2) / 3);
         addDelayCandidate((maxDelayFrames + 1) / 2);
@@ -960,7 +967,7 @@ $on_mod(Loaded) {
     freopen_s(&f, "CONOUT$", "w", stdout);
     SetConsoleTitleA("Geode Predictive Input Buffer - Live Console");
     printf("============================================================\n");
-    printf(" [InputBuffer] v1.1.2 LOADED (microclick-safe input queue; conservative 16/24-tick prediction)\n");
+    printf(" [InputBuffer] v1.1.3 LOADED (microclick-safe queue; bounded distributed prediction)\n");
     printf(" [InputBuffer] Starting Mode: STAGE 1 (2 All / 2 Wave)\n");
     printf(" [InputBuffer] Press F9 in-level to cycle: 2/2 -> 4/4 -> 8/8 -> 16/16 -> 24/24 -> OFF\n");
     printf("============================================================\n");
