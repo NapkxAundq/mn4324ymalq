@@ -1,0 +1,31 @@
+name: Build Predictive Input Buffer
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Windows / Geometry Dash 2.2081
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Geode mod
+        uses: geode-sdk/build-geode-mod@main
+        with:
+          target: Windows
+          combine: true
+
+      - name: Package build
+        uses: geode-sdk/build-geode-mod/combine@main
+        id: build
+
+      - name: Upload .geode artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Predictive-Input-Buffer-Windows
+          path: ${{ steps.build.outputs.build-output }}
+          if-no-files-found: error
