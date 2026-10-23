@@ -1,16 +1,16 @@
 {
-  "geode": "5.11.2",
+  "geode": "5.10.1",
   "gd": {
     "win": "2.2081"
   },
-  "version": "v4.8.0",
+  "version": "v4.8.1",
   "id": "ai.predictivebuffer",
   "name": "Predictive Input Buffer",
   "developer": "lilWC",
-  "description": "Trajectory-based input buffer with live-state jump prediction, F9 presets, and optional Superb Input Precision tick timing.",
+  "description": "Trajectory-based input buffer with F9 presets up to 24 ticks, cube jump survival forecasting, and optional tick scheduling for Superb Input Precision on Geometry Dash 2.2081.",
   "dependencies": {
     "chizz.superb-input-precision": {
-      "version": ">=v0.1.4",
+      "version": ">=v1.0.0-beta.6",
       "required": false
     }
   }
