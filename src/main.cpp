@@ -9,6 +9,7 @@
 #include <Windows.h>
 #include <cstdio>
 #include <algorithm>
+#include <chrono>
 #include <vector>
 #include <utility>
 #include "SIPInputQueue.hpp"
@@ -24,6 +25,10 @@ using namespace geode::prelude;
 // This keeps isolated micro-clicks and spike/sawblade dodges 100% protected!
 constexpr int SPAM_INTERVAL_TICKS = 8;
 constexpr int SPAM_STREAK_REQUIRED = 3;
+
+// Cap the time spent comparing candidate delays. The budget is checked between simulations,
+// never mid-simulation; hitting it fails open (the live input passes through).
+constexpr double SIMULATION_BUDGET_MS = 6.0;
 
 // ============================================================================
 
@@ -613,6 +618,20 @@ public:
         int targetHorizon = isMiniWave ? 50 : (isWave ? 65 : 160);
         int maxDelayFrames = isWave ? m_maxTicksWave : m_maxTicksNormal;
 
+        // No candidate delay can be selected with a zero/negative limit.
+        if (maxDelayFrames <= 0) {
+            m_gameHolding = push;
+            return true;
+        }
+
+        // Never hitch the game indefinitely when every candidate requires a full simulation.
+        // Start just before the first forecast and only stop between candidate trajectories.
+        const auto simulationStart = std::chrono::steady_clock::now();
+        auto simulationBudgetExceeded = [&]() {
+            return std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - simulationStart).count() >= SIMULATION_BUDGET_MS;
+        };
+
         // 4. Check Frame 0 (immediate input) across the full trajectory horizon
         int ticksFrame0 = getSurvivalTicks(pl, p1, p2, isDual, 0, push, targetHorizon);
         if (ticksFrame0 >= targetHorizon) {
@@ -632,6 +651,11 @@ public:
         int bestTicks = ticksFrame0;
 
         for (int delay = 1; delay <= maxDelayFrames; delay++) {
+            if (simulationBudgetExceeded()) {
+                printf("[InputBuffer] Forecast budget %.1f ms reached; passing through unless a safe delay was already found.\n",
+                    SIMULATION_BUDGET_MS);
+                break;
+            }
             int ticks = getSurvivalTicks(pl, p1, p2, isDual, delay, push, targetHorizon);
 
             if (isWave) {
@@ -747,7 +771,7 @@ $on_mod(Loaded) {
     freopen_s(&f, "CONOUT$", "w", stdout);
     SetConsoleTitleA("Geode Predictive Input Buffer - Live Console");
     printf("============================================================\n");
-    printf(" [InputBuffer] v1.0.6 LOADED (Full audit: mode sync, trigger safety, ordered SIP subticks)\n");
+    printf(" [InputBuffer] v1.0.7 LOADED (Audit + bounded prediction + ordered SIP subticks)\n");
     printf(" [InputBuffer] Starting Mode: STAGE 1 (2 All / 2 Wave)\n");
     printf(" [InputBuffer] Press F9 in-level to cycle: 2/2 -> 4/4 -> 8/8 -> 16/16 -> 24/24 -> OFF\n");
     printf("============================================================\n");
@@ -915,10 +939,30 @@ class $modify(BufBaseGameLayer, GJBaseGameLayer) {
 
     void collisionCheckObjects(PlayerObject* player, gd::vector<GameObject*>* vec, int objectsCount, float dt) {
         if (s_sim.isSimulating()) {
-            gd::vector<GameObject*> extra;
-            extra.reserve(objectsCount);
-            for (int i = 0; i < objectsCount; i++) {
-                GameObject* obj = vec->at(i);
+            if (!vec) {
+                s_sim.markSimulationUnsupported(player);
+                return;
+            }
+
+            // Reuse the filtered collision list for every simulated tick. A local list
+            // is used only for unexpected re-entrant collision calls.
+            static gd::vector<GameObject*> scratch;
+            static bool scratchBusy = false;
+            gd::vector<GameObject*> local;
+            bool useScratch = !scratchBusy;
+            gd::vector<GameObject*>& extra = useScratch ? scratch : local;
+            if (useScratch) {
+                scratchBusy = true;
+                extra.clear();
+            } else {
+                extra.clear();
+            }
+            extra.reserve(std::min(objectsCount, static_cast<int>(vec->size())));
+
+            // Guard against a stale objectsCount; never index outside the source list.
+            int count = std::min(objectsCount, static_cast<int>(vec->size()));
+            for (int i = 0; i < count; i++) {
+                GameObject* obj = (*vec)[i];
                 if (!obj) continue;
                 if (obj->m_objectType == GameObjectType::Solid ||
                     obj->m_objectType == GameObjectType::Hazard ||
@@ -927,13 +971,13 @@ class $modify(BufBaseGameLayer, GJBaseGameLayer) {
                     obj->m_objectType == GameObjectType::Slope) {
                     extra.push_back(obj);
                 } else if (typeinfo_cast<EffectGameObject*>(obj) || typeinfo_cast<RingObject*>(obj)) {
-                    // This simulation deliberately cannot execute portals, pads, orbs and
-                    // other trigger side effects. If one enters this candidate set, do not
-                    // claim that the simplified path is safe.
+                    // This prediction does not execute trigger/orb/portal side effects.
+                    // A path near one of those objects therefore cannot prove a safe delay.
                     s_sim.markSimulationUnsupported(player);
                 }
             }
-            GJBaseGameLayer::collisionCheckObjects(player, &extra, extra.size(), dt);
+            GJBaseGameLayer::collisionCheckObjects(player, &extra, static_cast<int>(extra.size()), dt);
+            if (useScratch) scratchBusy = false;
             return;
         }
         GJBaseGameLayer::collisionCheckObjects(player, vec, objectsCount, dt);
