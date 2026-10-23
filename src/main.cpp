@@ -661,7 +661,10 @@ class $modify(BufBaseGameLayer, GJBaseGameLayer) {
 
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
-        if (!isHalfTick) s_sim.onSIPPhysicsTick();
+        if (!isHalfTick) {
+            s_sim.setFrameDelta(dt);
+            s_sim.onSIPPhysicsTick();
+        }
     }
 
     void handleButton(bool down, int button, bool isPlayer1) {
