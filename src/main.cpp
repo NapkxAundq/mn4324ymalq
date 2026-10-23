@@ -187,19 +187,7 @@ public:
     }
 
     void quit() {
-        if (m_simPlayer1) {
-            m_simPlayer1->release();
-            m_simPlayer1 = nullptr;
-        }
-        if (m_simPlayer2) {
-            m_simPlayer2->release();
-            m_simPlayer2 = nullptr;
-        }
-        m_simulating = false;
-        m_firingBuffered = false;
-        clearPendingInput();
-        m_rapidInputStreak = 0;
-        m_simulationUnsupported = false;
+        // Remove both hidden simulation players from the object layer before releasing them.
         if (m_simPlayer1) {
             if (m_simPlayer1->getParent()) m_simPlayer1->removeFromParentAndCleanup(true);
             m_simPlayer1->release();
@@ -210,6 +198,11 @@ public:
             m_simPlayer2->release();
             m_simPlayer2 = nullptr;
         }
+        m_simulating = false;
+        m_firingBuffered = false;
+        clearPendingInput();
+        m_rapidInputStreak = 0;
+        m_simulationUnsupported = false;
     }
 
     // F9 cycles through 2, 4, 8, 16, 24 ticks, then OFF.
