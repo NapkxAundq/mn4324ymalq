@@ -149,11 +149,14 @@ public:
         m_rapidInputStreak = 0;
     }
 
-    // F9 cycles through 2, 4, 8, 16, 24 ticks, then OFF.
-    // A command already in flight remains on its captured schedule when presets change.
+    // F9 cycles through the original LilWC timing rules with extended local presets.
+    // Flush an in-flight action before changing modes so switching stages cannot strand
+    // a press/release, including when SIP has already staged an event for its next tick.
     void cyclePreset() {
-        // Leave an already-captured input on its existing schedule. The buffer scheduler
-        // continues any pending action even if the selected preset becomes OFF.
+        PlayLayer* pl = PlayLayer::get();
+        if (pl && (m_waitTicks != -1 || m_sipReadyAction || !m_sipInputsAfterOpposite.empty())) {
+            flushPendingInput(pl);
+        }
         m_presetIndex = (m_presetIndex + 1) % 6;
         switch (m_presetIndex) {
             case 0:
