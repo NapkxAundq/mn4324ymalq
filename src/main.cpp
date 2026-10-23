@@ -548,8 +548,15 @@ public:
             return false;
         }
 
-        // If a queued opposite action is due to fire on the next tick (m_waitTicks == -2)
-        // and the user clicks again, fire the pending opposite action first
+        // In SIP mode, a queued opposite command is represented by a scheduled queue event.
+        // Do not fire it a second time from a later event in the same queue-processing pass.
+        if (m_waitTicks == -2 && sipOutput) {
+            m_gameHolding = push;
+            return true;
+        }
+
+        // Native tick scheduler: if an opposite action is due and another input arrives,
+        // restore the pending transition before processing the new command.
         if (m_waitTicks == -2) {
             bool fireOpposite = m_gameHolding != !m_bufferedPush;
             SIPInput queuedOpposite = m_queuedOppositeSIPInput;
