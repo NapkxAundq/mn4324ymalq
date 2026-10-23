@@ -943,6 +943,11 @@ class $modify(BufPlayerObject, PlayerObject) {
     }
 
     void update(float dt) {
+        // The hidden clones are stepped explicitly by getSurvivalTicks(). They remain
+        // scene children for Geode/CCNode lifetime management, but must not receive an
+        // extra unsimulated physics update from the normal scene scheduler.
+        if (!s_sim.isSimulating() && s_sim.isSimulatedPlayer(this)) return;
+
         if (!s_sim.isSimulating()) {
             s_sim.onPlayerUpdate(this);
         }
