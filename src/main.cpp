@@ -28,7 +28,7 @@ constexpr int SPAM_STREAK_REQUIRED = 3;
 
 // Cap the time spent comparing candidate delays. The budget is checked between simulations,
 // never mid-simulation; hitting it fails open (the live input passes through).
-constexpr double SIMULATION_BUDGET_MS = 6.0;
+constexpr double SIMULATION_BUDGET_MS = 24.0;
 
 // ============================================================================
 
@@ -299,8 +299,13 @@ public:
 
         float dt = getValidDt();
         int survived = 0;
+        bool isContinuousMode = realP1->m_isDart || realP1->m_isBird || realP1->m_isSwing ||
+                                (isDual && realP2 && (realP2->m_isDart || realP2->m_isBird || realP2->m_isSwing));
+        int airborneTicks = 0;
+        int safeLandedTicks = 0;
 
-        // A brief landing is not proof of full-horizon survival. Run the complete forecast.
+        // Match LilWC's established logic: a safe landing counts as surviving this
+        // prediction horizon; continuous modes (Wave/UFO/Swing) keep simulating.
         for (int i = 0; i < delayFrames + maxTicks; i++) {
             if (i == delayFrames) {
                 if (actionPush) {
@@ -330,7 +335,23 @@ public:
                 if (m_simulationDead || m_simulationUnsupported) break;
             }
 
-            if (i >= delayFrames) survived++;
+            if (i >= delayFrames) {
+                survived++;
+                if (!isContinuousMode) {
+                    bool p1Grounded = m_simPlayer1->m_isOnGround;
+                    bool p2Grounded = (!isDual || !m_simPlayer2) ? true : m_simPlayer2->m_isOnGround;
+                    if (!p1Grounded || !p2Grounded) {
+                        airborneTicks++;
+                        safeLandedTicks = 0;
+                    } else if (airborneTicks >= 15) {
+                        safeLandedTicks++;
+                        if (safeLandedTicks >= 10) {
+                            survived = maxTicks;
+                            break;
+                        }
+                    }
+                }
+            }
         }
 
         m_simulating = false;
@@ -712,8 +733,11 @@ public:
         int bestDelay = 0;
         int bestTicks = ticksFrame0;
 
+        int candidatesTested = 0;
         for (int delay = 1; delay <= maxDelayFrames; delay++) {
-            if (simulationBudgetExceeded()) {
+            // Always evaluate the first four real delay candidates, even on a slower PC;
+            // a strict time-only cutoff here previously made the buffer pass every input.
+            if (candidatesTested >= 4 && simulationBudgetExceeded()) {
                 if (!m_warnedBudgetCutoff) {
                     printf("[InputBuffer] Forecast budget %.1f ms reached; stopping the delay scan for this level.\n",
                         SIMULATION_BUDGET_MS);
@@ -722,10 +746,16 @@ public:
                 break;
             }
             int ticks = getSurvivalTicks(pl, p1, p2, isDual, delay, push, targetHorizon);
+            candidatesTested++;
+
+            if (ticks < 0) {
+                // An invalid simulation must not erase a safer candidate already found.
+                continue;
+            }
 
             if (isWave) {
-                // Preserve LilWC's wave-specific trajectory heuristic: a delayed turn may
-                // clear the immediate corner/spike even when another hazard lies later.
+                // Preserve LilWC's threshold and partial-improvement fallback. The fallback
+                // is important on levels where every candidate encounters a later hazard.
                 int minClearedGain = (delay * 2) + 10;
                 if (ticks >= targetHorizon && (ticks - ticksFrame0) >= (delay * 2) + 6) {
                     bestDelay = delay;
@@ -737,11 +767,18 @@ public:
                     bestTicks = ticks;
                     if (ticks >= targetHorizon) break;
                 }
-            } else if (ticks >= targetHorizon) {
-                // For cube/robot/ball/UFO and other modes, only count a complete safe horizon.
-                bestDelay = delay;
-                bestTicks = ticks;
-                break;
+            } else {
+                if (ticks >= targetHorizon) {
+                    bestDelay = delay;
+                    bestTicks = ticks;
+                    break;
+                }
+                // Do not require a full horizon for every mode: a meaningful survival gain
+                // is a valid save, just as in LilWC's original implementation.
+                if (ticks > bestTicks + 12) {
+                    bestDelay = delay;
+                    bestTicks = ticks;
+                }
             }
         }
 
@@ -847,7 +884,7 @@ $on_mod(Loaded) {
     freopen_s(&f, "CONOUT$", "w", stdout);
     SetConsoleTitleA("Geode Predictive Input Buffer - Live Console");
     printf("============================================================\n");
-    printf(" [InputBuffer] v1.0.8 LOADED (Full audit + ordered SIP replay + bounded prediction)\n");
+    printf(" [InputBuffer] v1.0.9 LOADED (LilWC timing restored + resilient candidate search)\n");
     printf(" [InputBuffer] Starting Mode: STAGE 1 (2 All / 2 Wave)\n");
     printf(" [InputBuffer] Press F9 in-level to cycle: 2/2 -> 4/4 -> 8/8 -> 16/16 -> 24/24 -> OFF\n");
     printf("============================================================\n");
@@ -877,10 +914,7 @@ class $modify(BufPlayLayer, PlayLayer) {
     }
 
     void flipGravity(PlayerObject* p0, bool p1, bool p2) {
-        if (s_sim.isSimulating()) {
-            s_sim.markSimulationUnsupported(p0);
-            return;
-        }
+        if (s_sim.isSimulating()) return;
         PlayLayer::flipGravity(p0, p1, p2);
     }
 
@@ -915,10 +949,7 @@ class $modify(BufEffectGameObject, EffectGameObject) {
     }
 
     void triggerObject(GJBaseGameLayer* p0, int p1, const gd::vector<int>* p2) {
-        if (s_sim.isSimulating()) {
-            s_sim.markSimulationUnsupported();
-            return;
-        }
+        if (s_sim.isSimulating()) return;
         EffectGameObject::triggerObject(p0, p1, p2);
     }
 };
@@ -967,10 +998,7 @@ class $modify(BufPlayerObject, PlayerObject) {
     }
 
     void ringJump(RingObject* p0, bool p1) {
-        if (s_sim.isSimulating()) {
-            s_sim.markSimulationUnsupported(this);
-            return;
-        }
+        if (s_sim.isSimulating()) return;
         PlayerObject::ringJump(p0, p1);
     }
 };
@@ -986,10 +1014,9 @@ class $modify(BufBaseGameLayer, GJBaseGameLayer) {
     }
 
     bool canBeActivatedByPlayer(PlayerObject* p0, EffectGameObject* p1) {
-        if (s_sim.isSimulating()) {
-            s_sim.markSimulationUnsupported(p0);
-            return false;
-        }
+        // Suppress trigger activation side effects in simulation, but do not invalidate the
+        // whole forecast merely because an activator is encountered nearby (LilWC behavior).
+        if (s_sim.isSimulating()) return false;
         return GJBaseGameLayer::canBeActivatedByPlayer(p0, p1);
     }
 
@@ -1050,11 +1077,7 @@ class $modify(BufBaseGameLayer, GJBaseGameLayer) {
                     obj->m_objectType == GameObjectType::CollisionObject ||
                     obj->m_objectType == GameObjectType::Slope) {
                     extra.push_back(obj);
-                } else if (typeinfo_cast<EffectGameObject*>(obj) || typeinfo_cast<RingObject*>(obj)) {
-                    // This prediction does not execute trigger/orb/portal side effects.
-                    // A path near one of those objects therefore cannot prove a safe delay.
-                    s_sim.markSimulationUnsupported(player);
-                }
+                } // Trigger/ring side effects are suppressed by hooks above, as in LilWC's original.
             }
             GJBaseGameLayer::collisionCheckObjects(player, &extra, static_cast<int>(extra.size()), dt);
             if (useScratch) scratchBusy = false;
@@ -1064,10 +1087,7 @@ class $modify(BufBaseGameLayer, GJBaseGameLayer) {
     }
 
     void playerTouchedRing(PlayerObject* player, RingObject* ring) {
-        if (s_sim.isSimulating()) {
-            s_sim.markSimulationUnsupported(player);
-            return;
-        }
+        if (s_sim.isSimulating()) return;
         GJBaseGameLayer::playerTouchedRing(player, ring);
     }
 };
