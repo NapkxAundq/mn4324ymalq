@@ -32,6 +32,7 @@ private:
     bool m_simulating = false;
     bool m_firingBuffered = false;
     bool m_simulationDead = false;
+    bool m_warnedInputModConflict = false;
 
     // Tracks actual physical mouse state vs what PlayLayer currently has active
     bool m_physicalHolding = false;
@@ -119,6 +120,7 @@ public:
         m_firingBuffered = false;
         m_ticksSinceLastInput = 999;
         m_rapidInputStreak = 0;
+        m_warnedInputModConflict = false;
     }
 
     void quit() {
@@ -303,6 +305,19 @@ public:
         // Always record the user's true physical mouse/key state first!
         m_physicalHolding = push;
 
+        // If both mutually-incompatible timing mods are somehow active, fail open:
+        // do not delay or swallow inputs, and avoid leaving a stale queued action.
+        if (hasInputModConflict()) {
+            m_waitTicks = -1;
+            m_queuedOpposite = false;
+            m_gameHolding = push;
+            if (!m_warnedInputModConflict) {
+                printf("[InputBuffer] WARNING: CBF and SIP are both active. Disable one; buffer bypassed.\\n");
+                m_warnedInputModConflict = true;
+            }
+            return true;
+        }
+
         if (!m_enabled) {
             m_gameHolding = push;
             return true;
@@ -444,8 +459,31 @@ public:
         return true;
     }
 
+    bool isSIPEnabled() const {
+        auto* loader = Loader::get();
+        if (!loader) return false;
+        auto* sip = loader->getLoadedMod("chizz.superb-input-precision");
+        // A mod may be installed/loaded while disabled in its own settings.
+        // In that case keep the proven vanilla/CBF tick driver.
+        return sip && sip->getSettingValue<bool>("mod-enabled");
+    }
+
+    bool isCBFLoaded() const {
+        auto* loader = Loader::get();
+        if (!loader) return false;
+        return loader->getLoadedMod("syzzi.click_between_frames") != nullptr ||
+               loader->getLoadedMod("zmx.cbf-lite") != nullptr;
+    }
+
+    bool hasInputModConflict() const {
+        // CBF and SIP must never drive input timing at the same time.
+        return isSIPEnabled() && isCBFLoaded();
+    }
+
     bool usesSIPTickClock() const {
-        return Loader::get()->getLoadedMod("chizz.superb-input-precision") != nullptr;
+        // Don't switch the counter to SIP's clock simply because SIP is installed.
+        // If SIP is disabled, the original tick clock remains in charge.
+        return isSIPEnabled() && !isCBFLoaded();
     }
 
     void onPlayerUpdate(PlayerObject* player) {
