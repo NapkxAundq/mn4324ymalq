@@ -51,7 +51,7 @@ private:
     bool m_physicalHolding = false;
     bool m_gameHolding = false;
 
-    // F6 Cycle State (Starts on Stage 0: 2 ticks Normal / 2 ticks Wave)
+    // F9 Cycle State (Starts on Stage 0: 2 ticks Normal / 2 ticks Wave)
     int  m_presetIndex = 0;
     bool m_enabled = true;
     int  m_maxTicksNormal = 2;
@@ -490,6 +490,13 @@ public:
             std::stable_sort(fallbackActions.begin(), fallbackActions.end(),
                 [](auto const& a, auto const& b) { return a.first < b.first; });
             for (auto const& action : fallbackActions) m_SimFireButton(pl, action.second);
+            // Deferred events came from a prior physics tick and are no longer in the
+            // game's raw queue. Replay them explicitly if SIP rejects our rewritten queue.
+            for (auto const& item : deferredInputs) {
+                if (static_cast<int>(item.input.m_button) == 1) {
+                    m_SimFireButton(pl, item.input.m_isPush);
+                }
+            }
             clearPendingInput();
             m_rapidInputStreak = 0;
             for (auto const& item : queueWithRatios) {
