@@ -46,7 +46,7 @@ private:
     bool m_simulationUnsupported = false;
     bool m_warnedInputModConflict = false;
     bool m_warnedBudgetCutoff = false;
-    int m_noSaveDiagnostics = 0; // bounded per-level diagnostics so no-op regressions are visible
+    int m_predictionUnavailableWarnings = 0; // bounded per-level diagnostics so no-op regressions are visible
 
     // Tracks actual physical mouse state vs what PlayLayer currently has active
     bool m_physicalHolding = false;
@@ -193,7 +193,7 @@ public:
         m_rapidInputStreak = 0;
         m_warnedInputModConflict = false;
         m_warnedBudgetCutoff = false;
-        m_noSaveDiagnostics = 0;
+        m_predictionUnavailableWarnings = 0;
         m_simulationUnsupported = false;
     }
 
@@ -702,6 +702,10 @@ public:
         // so it sees spikes and sawblades 1-3 blocks ahead along the diagonal path!
         int targetHorizon = isMiniWave ? 50 : (isWave ? 65 : 160);
         int maxDelayFrames = isWave ? m_maxTicksWave : m_maxTicksNormal;
+        // High-delay stages can move a click far enough to turn a merely improved path
+        // into a death. In stages 16/24, only accept a candidate that survives the full
+        // prediction horizon; otherwise fail open and send the original input immediately.
+        bool conservativeHighDelay = maxDelayFrames >= 16;
 
         // No candidate delay can be selected with a zero/negative limit.
         if (maxDelayFrames <= 0) {
@@ -726,9 +730,9 @@ public:
         // If the path touches unsupported trigger logic, do not let a guessed trajectory
         // delay an input. Pass through the player's actual command instead.
         if (ticksFrame0 < 0) {
-            if (m_noSaveDiagnostics < 8) {
+            if (m_predictionUnavailableWarnings < 8) {
                 printf("[InputBuffer] Prediction unavailable for this input; passing through instead of delaying an unverified click. Check the current level's collision/trigger area.\n");
-                ++m_noSaveDiagnostics;
+                ++m_predictionUnavailableWarnings;
             }
             m_gameHolding = push;
             return true;
@@ -768,7 +772,8 @@ public:
                     bestTicks = ticks;
                     break;
                 }
-                if (ticks >= ticksFrame0 + minClearedGain && ticks > bestTicks + 2) {
+                if (!conservativeHighDelay &&
+                    ticks >= ticksFrame0 + minClearedGain && ticks > bestTicks + 2) {
                     bestDelay = delay;
                     bestTicks = ticks;
                     if (ticks >= targetHorizon) break;
@@ -781,7 +786,7 @@ public:
                 }
                 // Do not require a full horizon for every mode: a meaningful survival gain
                 // is a valid save, just as in LilWC's original implementation.
-                if (ticks > bestTicks + 12) {
+                if (!conservativeHighDelay && ticks > bestTicks + 12) {
                     bestDelay = delay;
                     bestTicks = ticks;
                 }
@@ -802,15 +807,6 @@ public:
             m_hasQueuedOppositeSIPInput = false;
             m_sipReadyAction = false;
             return false;
-        }
-
-        if (push && ticksFrame0 < targetHorizon && bestDelay == 0 && m_noSaveDiagnostics < 8) {
-            const char* modeName = isWave ? "WAVE" :
-                (p1->m_isRobot ? "ROBOT" : (p1->m_isBall ? "BALL" :
-                (p1->m_isBird ? "UFO" : (isCube ? "CUBE" : "OTHER"))));
-            printf("[InputBuffer] No save found for %s: baseline=%d/%d ticks, tested %d/%d delays. Buffer is active; no candidate met LilWC's save thresholds.\n",
-                modeName, ticksFrame0, targetHorizon, candidatesTested, maxDelayFrames);
-            ++m_noSaveDiagnostics;
         }
 
         m_gameHolding = push;
@@ -894,7 +890,7 @@ $on_mod(Loaded) {
     freopen_s(&f, "CONOUT$", "w", stdout);
     SetConsoleTitleA("Geode Predictive Input Buffer - Live Console");
     printf("============================================================\n");
-    printf(" [InputBuffer] v1.0.9 LOADED (LilWC thresholds restored; bounded search + no-save diagnostics)\n");
+    printf(" [InputBuffer] v1.1.0 LOADED (conservative high-delay prediction; no no-save spam)\n");
     printf(" [InputBuffer] Starting Mode: STAGE 1 (2 All / 2 Wave)\n");
     printf(" [InputBuffer] Press F9 in-level to cycle: 2/2 -> 4/4 -> 8/8 -> 16/16 -> 24/24 -> OFF\n");
     printf("============================================================\n");
