@@ -106,6 +106,54 @@ private:
         sim->m_playerSpeed = real->m_playerSpeed;
     }
 
+    void clearPendingInput() {
+        m_waitTicks = -1;
+        m_queuedOpposite = false;
+        m_hasBufferedSIPInput = false;
+        m_hasQueuedOppositeSIPInput = false;
+        m_sipReadyAction = false;
+        m_sipInputsAfterOpposite.clear();
+    }
+
+    void appendSIPAction(PlayLayer* pl, SIPInputQueue& output, SIPInput source, bool push,
+                         std::vector<std::pair<double, bool>>* fallbackActions = nullptr) {
+        source.input.m_button = PlayerButton::Jump;
+        source.input.m_isPush = push;
+        source.input.m_isPlayer2 = false;
+        output.push_back(source);
+        if (fallbackActions) fallbackActions->push_back({source.ratio, push});
+
+        if (pl && pl->m_gameState.m_isDualMode && (!pl->m_level || !pl->m_level->m_twoPlayerMode)) {
+            source.input.m_isPlayer2 = true;
+            output.push_back(source);
+        }
+        m_gameHolding = push;
+    }
+
+    void flushPendingInput(PlayLayer* pl) {
+        if (!pl) {
+            clearPendingInput();
+            return;
+        }
+
+        // This path is reserved for emergency passthroughs (e.g. an input-mod conflict or
+        // a mode transition). Never drop a captured press/release pair in that case.
+        if (m_waitTicks >= 0) {
+            m_SimFireButton(pl, m_bufferedPush);
+            if (m_queuedOpposite) m_SimFireButton(pl, !m_bufferedPush);
+        } else if (m_waitTicks == -2 || m_sipReadyAction) {
+            m_SimFireButton(pl, !m_bufferedPush);
+        }
+        // Fail-open fallback: replay events deferred behind the queued opposite before
+        // allowing a fresh raw queue to reach the game.
+        for (auto const& item : m_sipInputsAfterOpposite) {
+            if (static_cast<int>(item.input.m_button) == 1) {
+                m_SimFireButton(pl, item.input.m_isPush);
+            }
+        }
+        clearPendingInput();
+    }
+
     float getValidDt() const {
         if (m_frameDt > 0.001f && m_frameDt < 2.0f) {
             return m_frameDt;
