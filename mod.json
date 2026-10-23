@@ -1,13 +1,13 @@
 {
-  "geode": "5.10.1",
+  "geode": "5.11.2",
   "gd": {
     "win": "2.2081"
   },
-  "version": "v1.0.5",
+  "version": "v1.0.6",
   "id": "ai.predictivebuffer",
   "name": "Predictive Input Buffer",
   "developer": "lilWC",
-  "description": "Audited predictive input buffer for Geometry Dash 2.2081: full-horizon safety checks, conservative handling of unmodelled triggers, improved Robot/Ball/Cube/UFO predictions, original Wave timing heuristic, F9 presets through 24 ticks, and optional SIP beta.6 subtick-queue integration.",
+  "description": "Audited predictive input buffer for Geometry Dash 2.2081: full-horizon survival checks, conservative handling of unmodelled triggers, safer Robot/Ball/Cube/UFO forecasts, original Wave timing heuristic, F9 presets through 24 ticks, and optional Superb Input Precision beta.6 subtick-queue integration.",
   "dependencies": {
     "chizz.superb-input-precision": {
       "version": ">=v1.0.0-beta.6",
