@@ -3,11 +3,11 @@
   "gd": {
     "win": "2.2081"
   },
-  "version": "v1.1.1",
+  "version": "v1.1.2",
   "id": "ai.predictivebuffer",
   "name": "Predictive Input Buffer",
   "developer": "lilWC",
-  "description": "Predictive Input Buffer for Geometry Dash 2.2081: protected short input pairs across modes and stages, latency-sensitive Wave/Robot releases, broader sampled delay search, full-horizon safety for high-delay stages, and optional Superb Input Precision beta.6 integration.",
+  "description": "Predictive Input Buffer for Geometry Dash 2.2081: preserves rapid press-release-press sequences, protects short input pairs across modes and stages, improves Wave timing search, validates full-horizon survival at 16/24 ticks, and optionally integrates Superb Input Precision beta.6.",
   "dependencies": {
     "chizz.superb-input-precision": {
       "version": ">=v1.0.0-beta.6",
