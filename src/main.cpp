@@ -69,6 +69,9 @@ private:
     bool m_sipReadyPush = true;
     SIPInput m_bufferedSIPInput{};
     SIPInput m_queuedOppositeSIPInput{};
+    // Inputs that arrive after a buffered press but before its queued opposite action.
+    // They must be replayed after that opposite action on the next SIP tick.
+    SIPInputQueue m_sipInputsAfterOpposite;
     float m_frameDt = 0.25f;        // GD 240 TPS normalized dt is 0.25f
 
     // Streak-based Spam Guard state
@@ -123,6 +126,7 @@ private:
         m_hasBufferedSIPInput = false;
         m_hasQueuedOppositeSIPInput = false;
         m_sipReadyAction = false;
+        m_sipInputsAfterOpposite.clear();
     }
 
     void appendSIPAction(PlayLayer* pl, SIPInputQueue& output, SIPInput source, bool push,
@@ -153,6 +157,13 @@ private:
             if (m_queuedOpposite) m_SimFireButton(pl, !m_bufferedPush);
         } else if (m_waitTicks == -2 || m_sipReadyAction) {
             m_SimFireButton(pl, !m_bufferedPush);
+        }
+        // Fail-open fallback: replay events deferred behind the queued opposite before
+        // allowing a fresh raw queue to reach the game.
+        for (auto const& item : m_sipInputsAfterOpposite) {
+            if (static_cast<int>(item.input.m_button) == 1) {
+                m_SimFireButton(pl, item.input.m_isPush);
+            }
         }
         clearPendingInput();
     }
@@ -364,47 +375,86 @@ public:
 
         auto queueWithRatios = queueResult.unwrap();
         SIPInputQueue filtered;
-        filtered.reserve(queueWithRatios.size() + 4);
+        filtered.reserve(queueWithRatios.size() + m_sipInputsAfterOpposite.size() + 4);
         std::vector<std::pair<double, bool>> fallbackActions;
 
         struct SIPQueueEvent {
             SIPInput command;
             bool isBufferedAction;
             bool push;
+            int phase; // ready delayed action -> previously deferred input -> fresh input
         };
         std::vector<SIPQueueEvent> timeline;
-        timeline.reserve(queueWithRatios.size() + 1);
+        timeline.reserve(queueWithRatios.size() + m_sipInputsAfterOpposite.size() + 1);
+
+        double earliestFreshJumpRatio = 1.0;
+        bool hasFreshJump = false;
         for (auto const& item : queueWithRatios) {
-            timeline.push_back({item, false, item.input.m_isPush});
+            if (static_cast<int>(item.input.m_button) == 1) {
+                earliestFreshJumpRatio = std::min(earliestFreshJumpRatio, item.ratio);
+                hasFreshJump = true;
+            }
         }
 
         // Only this path owns F9 while SIP is active.
         if (GetAsyncKeyState(VK_F9) & 1) cyclePreset();
 
-        // Merge a ready buffered command into the same chronological stream as fresh inputs.
-        // This matters when a new sub-tick input occurs before the delayed command's ratio.
+        // A ready delayed event is older than the inputs now in SIP's queue. Keep its
+        // sub-tick ratio unless that would reorder it after a newer button event.
+        // In that case, clamp it to the first current-tick button ratio.
+        bool haveReadySource = false;
+        SIPInput readySource{};
+        double readyRatio = 0.0;
         if (m_sipReadyAction) {
-            SIPInput source{};
             if (m_sipReadyPush == m_bufferedPush && m_hasBufferedSIPInput) {
-                source = m_bufferedSIPInput;
+                readySource = m_bufferedSIPInput;
+                haveReadySource = true;
             } else if (m_sipReadyPush != m_bufferedPush && m_hasQueuedOppositeSIPInput) {
-                source = m_queuedOppositeSIPInput;
+                readySource = m_queuedOppositeSIPInput;
+                haveReadySource = true;
             } else if (m_hasBufferedSIPInput) {
-                source = m_bufferedSIPInput;
+                readySource = m_bufferedSIPInput;
+                haveReadySource = true;
             }
-            source.input.m_button = PlayerButton::Jump;
-            source.input.m_isPush = m_sipReadyPush;
-            source.input.m_isPlayer2 = false;
-            timeline.push_back({source, true, m_sipReadyPush});
+
+            readySource.input.m_button = PlayerButton::Jump;
+            readySource.input.m_isPush = m_sipReadyPush;
+            readySource.input.m_isPlayer2 = false;
+            readyRatio = haveFreshJump ? std::min(readySource.ratio, earliestFreshJumpRatio) : readySource.ratio;
+            readySource.ratio = readyRatio;
+            timeline.push_back({readySource, true, m_sipReadyPush, 0});
+        }
+
+        // These inputs were observed after the buffered press was emitted but before its
+        // queued release/press could run. Replay them after that opposite transition, and
+        // before fresh events from this tick. Normalize their ratio only as far as needed
+        // to keep cross-tick event order intact.
+        auto deferredInputs = std::move(m_sipInputsAfterOpposite);
+        m_sipInputsAfterOpposite.clear();
+        double deferredRatio = haveReadySource ? readyRatio : (hasFreshJump ? earliestFreshJumpRatio : 0.0);
+        for (auto item : deferredInputs) {
+            item.ratio = deferredRatio;
+            timeline.push_back({item, false, item.input.m_isPush, 1});
+        }
+
+        for (auto const& item : queueWithRatios) {
+            timeline.push_back({item, false, item.input.m_isPush, 2});
         }
 
         std::stable_sort(timeline.begin(), timeline.end(), [](SIPQueueEvent const& a, SIPQueueEvent const& b) {
+            if (a.phase != b.phase) return a.phase < b.phase;
             return a.command.ratio < b.command.ratio;
         });
 
         for (auto const& event : timeline) {
             if (event.isBufferedAction) {
-                appendSIPAction(pl, filtered, event.command, event.push, &fallbackActions);
+                if (haveReadySource) {
+                    appendSIPAction(pl, filtered, event.command, event.push, &fallbackActions);
+                } else {
+                    // A missing source command should never silently eat the input.
+                    m_SimFireButton(pl, event.push);
+                    fallbackActions.push_back({event.command.ratio, event.push});
+                }
                 m_sipReadyAction = false;
                 if (event.push == m_bufferedPush && m_queuedOpposite) {
                     // The original press/release pair stays separated by a complete physics tick.
@@ -425,10 +475,6 @@ public:
             if (keepInput) filtered.push_back(item);
         }
 
-        // setInputQueueWithRatios timestamps by ratio; keep commands chronologically ordered.
-        std::stable_sort(filtered.begin(), filtered.end(), [](SIPInput const& a, SIPInput const& b) {
-            return a.ratio < b.ratio;
-        });
         // Keep our logical hold state aligned with the exact queue SIP will receive.
         bool finalGameHolding = m_gameHolding;
         for (auto const& item : filtered) {
@@ -467,8 +513,9 @@ public:
 
         // SIP processes the queue before processCommands. Mark an expiring action ready here;
         // it is injected at its preserved ratio in the next queue-processing phase.
-        if (pl->m_player1->m_isShip ||
-            (pl->m_gameState.m_isDualMode && pl->m_player2 && pl->m_player2->m_isShip)) {
+        bool twoPlayerControl = pl->m_level && pl->m_level->m_twoPlayerMode;
+        bool sharedDual = pl->m_gameState.m_isDualMode && pl->m_player2 && !twoPlayerControl;
+        if (pl->m_player1->m_isShip || (sharedDual && pl->m_player2->m_isShip)) {
             flushPendingInput(pl);
             if (m_gameHolding != m_physicalHolding) m_SimFireButton(pl, m_physicalHolding);
             return;
@@ -560,6 +607,10 @@ public:
         // In SIP mode, a queued opposite command is represented by a scheduled queue event.
         // Do not fire it a second time from a later event in the same queue-processing pass.
         if (m_waitTicks == -2 && sipOutput) {
+            if (sipInput) {
+                m_sipInputsAfterOpposite.push_back(*sipInput);
+                return false;
+            }
             m_gameHolding = push;
             return true;
         }
@@ -729,7 +780,9 @@ public:
             m_ticksSinceLastInput++;
         }
 
-        if (player->m_isShip || (pl->m_gameState.m_isDualMode && pl->m_player2 && pl->m_player2->m_isShip)) {
+        bool twoPlayerControl = pl->m_level && pl->m_level->m_twoPlayerMode;
+        bool sharedDual = pl->m_gameState.m_isDualMode && pl->m_player2 && !twoPlayerControl;
+        if (player->m_isShip || (sharedDual && pl->m_player2->m_isShip)) {
             flushPendingInput(pl);
             if (m_gameHolding != m_physicalHolding) {
                 m_SimFireButton(pl, m_physicalHolding);
@@ -778,7 +831,7 @@ $on_mod(Loaded) {
     freopen_s(&f, "CONOUT$", "w", stdout);
     SetConsoleTitleA("Geode Predictive Input Buffer - Live Console");
     printf("============================================================\n");
-    printf(" [InputBuffer] v1.0.7 LOADED (Full audit + state sync + bounded prediction)\n");
+    printf(" [InputBuffer] v1.0.8 LOADED (Full audit + ordered SIP replay + bounded prediction)\n");
     printf(" [InputBuffer] Starting Mode: STAGE 1 (2 All / 2 Wave)\n");
     printf(" [InputBuffer] Press F9 in-level to cycle: 2/2 -> 4/4 -> 8/8 -> 16/16 -> 24/24 -> OFF\n");
     printf("============================================================\n");
